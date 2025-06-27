@@ -4,37 +4,131 @@ HADM FastAPI Server
 Provides REST API endpoints for Human Artifact Detection using HADM-L and HADM-G models
 """
 
-import os
-import io
-import asyncio
-import logging
-from pathlib import Path
-from typing import Optional, Dict, Any, List
-from queue import Queue
-from threading import Thread
-import base64
 import time
+import sys
+
+
+def log_import_time(name):
+    """Log import timing"""
+    timestamp = time.strftime("%H:%M:%S.%f")[:-3]  # Include milliseconds
+    print(f"[{timestamp}] Importing {name}...")
+
+
+print(f"[{time.strftime('%H:%M:%S.%f')[:-3]}] Starting api.py imports...")
+
+log_import_time("os")
+import os
+
+log_import_time("io")
+import io
+
+log_import_time("asyncio")
+import asyncio
+
+log_import_time("logging")
+import logging
+
+log_import_time("pathlib.Path")
+from pathlib import Path
+
+log_import_time("typing")
+from typing import Optional, Dict, Any, List
+
+log_import_time("queue.Queue")
+from queue import Queue
+
+log_import_time("threading.Thread")
+from threading import Thread
+
+log_import_time("base64")
+import base64
+
+log_import_time("contextlib")
 import contextlib
 
+print(f"[{time.strftime('%H:%M:%S.%f')[:-3]}] About to import torch...")
+start_torch = time.time()
+log_import_time("torch")
 import torch
+
+torch_duration = time.time() - start_torch
+print(f"[{time.strftime('%H:%M:%S.%f')[:-3]}] torch import took {torch_duration:.2f}s")
+
+log_import_time("numpy")
 import numpy as np
+
+log_import_time("PIL.Image")
 from PIL import Image
+
+print(f"[{time.strftime('%H:%M:%S.%f')[:-3]}] About to import uvicorn...")
+start_uvicorn = time.time()
+log_import_time("uvicorn")
 import uvicorn
+
+uvicorn_duration = time.time() - start_uvicorn
+print(
+    f"[{time.strftime('%H:%M:%S.%f')[:-3]}] uvicorn import took {uvicorn_duration:.2f}s"
+)
+
+print(f"[{time.strftime('%H:%M:%S.%f')[:-3]}] About to import fastapi...")
+start_fastapi = time.time()
+log_import_time("fastapi")
 from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks
+
+log_import_time("fastapi.responses")
 from fastapi.responses import JSONResponse
+
+log_import_time("fastapi.middleware.cors")
 from fastapi.middleware.cors import CORSMiddleware
+
+log_import_time("pydantic")
 from pydantic import BaseModel
 
+fastapi_duration = time.time() - start_fastapi
+print(
+    f"[{time.strftime('%H:%M:%S.%f')[:-3]}] fastapi imports took {fastapi_duration:.2f}s"
+)
+
 # Detectron2 imports
+print(f"[{time.strftime('%H:%M:%S.%f')[:-3]}] About to import detectron2...")
+start_detectron2 = time.time()
+
+log_import_time("detectron2.config")
 from detectron2.config import get_cfg, LazyConfig, instantiate
+
+log_import_time("detectron2.engine.defaults")
 from detectron2.engine.defaults import DefaultPredictor
+
+log_import_time("detectron2.data.detection_utils")
 from detectron2.data.detection_utils import read_image
+
+log_import_time("detectron2.utils.logger")
 from detectron2.utils.logger import setup_logger
+
+log_import_time("detectron2.checkpoint")
 from detectron2.checkpoint import DetectionCheckpointer
+
+log_import_time("omegaconf")
+from omegaconf import ListConfig, DictConfig, OmegaConf
+
+# Register OmegaConf classes as safe globals for torch.load
+import torch.serialization
+
+torch.serialization.add_safe_globals([ListConfig, DictConfig, OmegaConf])
+
+detectron2_duration = time.time() - start_detectron2
+print(
+    f"[{time.strftime('%H:%M:%S.%f')[:-3]}] detectron2 imports took {detectron2_duration:.2f}s"
+)
+
+print(f"[{time.strftime('%H:%M:%S.%f')[:-3]}] All imports completed!")
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+print(f"[{time.strftime('%H:%M:%S.%f')[:-3]}] About to create FastAPI app...")
+start_app_creation = time.time()
 
 # Global variables for models
 hadm_l_model = None
@@ -83,6 +177,14 @@ app = FastAPI(
     redoc_url="/redoc",
 )
 
+app_creation_duration = time.time() - start_app_creation
+print(
+    f"[{time.strftime('%H:%M:%S.%f')[:-3]}] FastAPI app creation took {app_creation_duration:.2f}s"
+)
+
+print(f"[{time.strftime('%H:%M:%S.%f')[:-3]}] Adding CORS middleware...")
+start_cors = time.time()
+
 # CORS middleware
 app.add_middleware(
     CORSMiddleware,
@@ -91,6 +193,13 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+cors_duration = time.time() - start_cors
+print(
+    f"[{time.strftime('%H:%M:%S.%f')[:-3]}] CORS middleware took {cors_duration:.2f}s"
+)
+
+print(f"[{time.strftime('%H:%M:%S.%f')[:-3]}] Defining functions...")
 
 
 def load_hadm_model(config_path: str, model_path: str, model_name: str):
@@ -119,6 +228,10 @@ def load_hadm_model(config_path: str, model_path: str, model_name: str):
             )
             logger.info(f"Updated init_checkpoint for {model_name}")
 
+        # Clean up any device references in model config to avoid conflicts
+        if hasattr(cfg.model, "device"):
+            delattr(cfg.model, "device")
+
         # Set device for training config
         if hasattr(cfg, "train"):
             cfg.train.device = str(device)
@@ -132,20 +245,24 @@ def load_hadm_model(config_path: str, model_path: str, model_name: str):
             model.to(device)
             model.eval()
 
-        # Load the HADM checkpoint with safe globals for OmegaConf
-        import torch.serialization
-        from omegaconf import ListConfig, DictConfig, OmegaConf
-
+        # Load the HADM checkpoint directly, bypassing fvcore's rigid checkpointer
         with log_time(f"{model_name} -> Load checkpoint"):
-            with torch.serialization.safe_globals([ListConfig, DictConfig, OmegaConf]):
+            logger.info(f"Loading checkpoint from {model_path} with torch.load...")
+            checkpoint_data = torch.load(
+                model_path, map_location=device, weights_only=False
+            )
+
+            # The actual model weights are in the 'model' key
+            if "model" in checkpoint_data:
+                # Use DetectionCheckpointer just for its weight-mapping logic
                 checkpointer = DetectionCheckpointer(model)
-                try:
-                    checkpointer.load(model_path)
-                except Exception as e:
-                    logger.warning(
-                        f"Safe checkpoint load failed: {e}. Retrying with weights_only=False (trusted source)."
-                    )
-                    checkpointer.load(model_path, weights_only=False)
+                # The _load_model method is what handles the state dict loading
+                checkpointer._load_model(checkpoint_data)
+            else:
+                logger.error(
+                    f"Checkpoint for {model_name} does not contain a 'model' key!"
+                )
+                return None
 
         logger.info(f"{model_name} model loaded successfully")
         logger.info(
@@ -616,5 +733,8 @@ async def startup_event():
 
 
 if __name__ == "__main__":
+    print(f"[{time.strftime('%H:%M:%S.%f')[:-3]}] About to start uvicorn server...")
+    start_uvicorn_run = time.time()
+
     # Run the server
     uvicorn.run("api:app", host="0.0.0.0", port=8080, reload=False, log_level="info")
