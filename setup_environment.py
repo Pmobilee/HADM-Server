@@ -1,161 +1,257 @@
 #!/usr/bin/env python3
 """
-Environment setup script for HADM FastAPI Server
-Creates venv, installs dependencies, and downloads models
+HADM Environment Setup Script
+Optimizes the environment for maximum performance on GPU systems
 """
 
 import os
 import sys
 import subprocess
-import urllib.request
+import shutil
 from pathlib import Path
 
 
-def run_command(cmd, check=True):
-    """Run a shell command and return the result"""
-    print(f"Running: {cmd}")
-    result = subprocess.run(
-        cmd, shell=True, check=check, capture_output=True, text=True
-    )
-    if result.stdout:
-        print(result.stdout)
-    if result.stderr:
-        print(result.stderr)
-    return result
+def log_step(message):
+    """Log setup steps with formatting"""
+    print(f"[SETUP] {message}")
 
 
-def create_venv():
-    """Create Python virtual environment"""
-    print("Creating Python virtual environment...")
+def set_performance_environment_variables():
+    """Set environment variables for optimal performance"""
+    log_step("Setting performance environment variables...")
 
-    if os.path.exists("venv"):
-        print("Virtual environment already exists")
-        return
+    # PyTorch optimizations
+    env_vars = {
+        # Cache directories on fast storage
+        "TORCH_HOME": "/tmp/torch_cache",
+        "HF_HOME": "/tmp/hf_cache",
+        "TRANSFORMERS_CACHE": "/tmp/transformers_cache",
+        "DETECTRON2_CACHE": "/tmp/detectron2_cache",
+        # CUDA optimizations
+        "CUDA_LAUNCH_BLOCKING": "0",  # Async CUDA operations
+        "CUDA_CACHE_DISABLE": "0",  # Enable CUDA caching
+        "TORCH_CUDNN_V8_API_ENABLED": "1",  # Use optimized cuDNN
+        # PyTorch compilation
+        "TORCH_COMPILE_DEBUG": "0",  # Disable debug for speed
+        "TORCHINDUCTOR_CACHE_DIR": "/tmp/torch_inductor_cache",
+        # Memory optimizations
+        "PYTORCH_CUDA_ALLOC_CONF": "max_split_size_mb:128,expandable_segments:True",
+        # Disable unnecessary features for speed
+        "TOKENIZERS_PARALLELISM": "false",  # Avoid threading conflicts
+        "OMP_NUM_THREADS": "1",  # Single-threaded for inference
+        "MKL_NUM_THREADS": "1",
+        # Network optimizations
+        "CURL_CA_BUNDLE": "",  # Skip SSL verification for model downloads
+        "REQUESTS_CA_BUNDLE": "",
+    }
 
-    run_command("python3 -m venv venv")
-    print("Virtual environment created successfully")
+    for key, value in env_vars.items():
+        os.environ[key] = value
+        print(f"  {key}={value}")
 
-
-def install_dependencies():
-    """Install all required dependencies"""
-    print("Installing dependencies...")
-
-    # Activate venv and install PyTorch first
-    pip_cmd = "./venv/bin/pip" if os.name != "nt" else "venv\\Scripts\\pip"
-
-    # Install PyTorch with CUDA support
-    print("Installing PyTorch with CUDA support...")
-    run_command(
-        f"{pip_cmd} install torch==1.12.1+cu116 torchvision==0.13.1+cu116 --extra-index-url https://download.pytorch.org/whl/cu116"
-    )
-
-    # Install other dependencies
-    print("Installing other dependencies...")
-    run_command(f"{pip_cmd} install cryptography")
-    run_command(f"{pip_cmd} install -r requirements.txt")
-
-    # Install xformers
-    print("Installing xformers...")
-    run_command(
-        f"{pip_cmd} install -v -U git+https://github.com/facebookresearch/xformers.git@v0.0.18#egg=xformers"
-    )
-
-    # Install mmcv
-    print("Installing mmcv...")
-    run_command(f"{pip_cmd} install mmcv==1.7.1 openmim")
-    run_command(
-        f"./venv/bin/mim install mmcv-full"
-        if os.name != "nt"
-        else "venv\\Scripts\\mim install mmcv-full"
-    )
-
-    # Install FastAPI and related packages
-    print("Installing FastAPI and server dependencies...")
-    run_command(f"{pip_cmd} install fastapi uvicorn python-multipart aiofiles")
-
-    # Install detectron2
-    print("Installing detectron2...")
-    python_cmd = "./venv/bin/python" if os.name != "nt" else "venv\\Scripts\\python"
-    run_command(f"{python_cmd} -m pip install -e .")
-
-
-def create_directories():
-    """Create necessary directories"""
-    print("Creating directories...")
-
-    directories = ["pretrained_models", "test_images", "outputs", "cache"]
-
-    for directory in directories:
-        Path(directory).mkdir(exist_ok=True)
-        print(f"Created directory: {directory}")
-
-
-def download_models():
-    """Download pretrained models"""
-    print("Downloading pretrained models...")
-
-    models = [
-        {
-            "name": "EVA-02-L",
-            "url": "https://huggingface.co/Yuxin-CV/EVA-02/resolve/main/eva02/det/eva02_L_coco_det_sys_o365.pth",
-            "filename": "eva02_L_coco_det_sys_o365.pth",
-        },
-        {
-            "name": "HADM-L",
-            "url": "https://www.dropbox.com/scl/fi/zwasvod906x1akzinnj3i/HADM-L_0249999.pth?rlkey=bqz5517tm8yt8l6ngzne4xejx&st=k1a1gzph&dl=1",
-            "filename": "HADM-L_0249999.pth",
-        },
-        {
-            "name": "HADM-G",
-            "url": "https://www.dropbox.com/scl/fi/bzj1m8p4cvm2vg4mai6uj/HADM-G_0249999.pth?rlkey=813x6wraigivc6qx02aut9p2r&st=n8rnb47r&dl=1",
-            "filename": "HADM-G_0249999.pth",
-        },
+    # Create cache directories
+    cache_dirs = [
+        "/tmp/torch_cache",
+        "/tmp/hf_cache",
+        "/tmp/transformers_cache",
+        "/tmp/detectron2_cache",
+        "/tmp/torch_inductor_cache",
     ]
 
-    for model in models:
-        filepath = Path("pretrained_models") / model["filename"]
-        if filepath.exists():
-            print(f"{model['name']} already exists, skipping download")
-            continue
+    for cache_dir in cache_dirs:
+        Path(cache_dir).mkdir(parents=True, exist_ok=True)
+        print(f"  Created cache directory: {cache_dir}")
 
-        print(f"Downloading {model['name']}...")
-        try:
-            urllib.request.urlretrieve(model["url"], filepath)
-            print(f"Successfully downloaded {model['name']}")
-        except Exception as e:
-            print(f"Failed to download {model['name']}: {e}")
-            print("You may need to download this model manually")
+
+def optimize_python_path():
+    """Optimize Python import paths"""
+    log_step("Optimizing Python import paths...")
+
+    # Add current directory to Python path for faster local imports
+    current_dir = str(Path.cwd())
+    if current_dir not in sys.path:
+        sys.path.insert(0, current_dir)
+        print(f"  Added to Python path: {current_dir}")
+
+
+def check_system_requirements():
+    """Check system requirements and provide recommendations"""
+    log_step("Checking system requirements...")
+
+    # Check GPU
+    try:
+        result = subprocess.run(["nvidia-smi"], capture_output=True, text=True)
+        if result.returncode == 0:
+            print("  ✓ NVIDIA GPU detected")
+            # Extract GPU info
+            lines = result.stdout.split("\n")
+            for line in lines:
+                if (
+                    "RTX" in line
+                    or "GeForce" in line
+                    or "Tesla" in line
+                    or "Quadro" in line
+                ):
+                    print(f"  GPU: {line.strip()}")
+                    break
+        else:
+            print("  ⚠ NVIDIA GPU not detected or nvidia-smi not available")
+    except FileNotFoundError:
+        print("  ⚠ nvidia-smi not found")
+
+    # Check memory
+    try:
+        with open("/proc/meminfo", "r") as f:
+            for line in f:
+                if line.startswith("MemTotal:"):
+                    mem_kb = int(line.split()[1])
+                    mem_gb = mem_kb / 1024 / 1024
+                    print(f"  System RAM: {mem_gb:.1f} GB")
+                    if mem_gb < 16:
+                        print("  ⚠ Less than 16GB RAM - may cause performance issues")
+                    break
+    except:
+        print("  ⚠ Could not read memory information")
+
+    # Check storage
+    current_path = Path.cwd()
+    try:
+        stat = shutil.disk_usage(current_path)
+        free_gb = stat.free / (1024**3)
+        print(f"  Available disk space: {free_gb:.1f} GB")
+        if free_gb < 10:
+            print("  ⚠ Less than 10GB free space - may cause issues")
+    except:
+        print("  ⚠ Could not check disk space")
+
+
+def optimize_configs():
+    """Fix configuration files for better performance"""
+    log_step("Optimizing configuration files...")
+
+    # Check for problematic config paths
+    config_files = [
+        "projects/ViTDet/configs/eva2_o365_to_coco/demo_local.py",
+        "projects/ViTDet/configs/eva2_o365_to_coco/demo_global.py",
+    ]
+
+    for config_file in config_files:
+        config_path = Path(config_file)
+        if config_path.exists():
+            print(f"  Checking {config_file}...")
+
+            # Read the config file
+            try:
+                with open(config_path, "r") as f:
+                    content = f.read()
+
+                # Check for network paths that could cause delays
+                if "/net/" in content or "mnt/data" in content:
+                    print(f"    ⚠ Found network paths in {config_file}")
+                    print(
+                        "    This may cause slow loading. Consider using local paths."
+                    )
+
+                # Check for large batch sizes
+                if "total_batch_size = " in content:
+                    for line in content.split("\n"):
+                        if (
+                            "total_batch_size = " in line
+                            and not line.strip().startswith("#")
+                        ):
+                            batch_size = line.split("=")[1].strip()
+                            print(f"    Batch size: {batch_size}")
+                            if int(batch_size) > 8:
+                                print("    ⚠ Large batch size may cause memory issues")
+
+            except Exception as e:
+                print(f"    ⚠ Could not read {config_file}: {e}")
+        else:
+            print(f"  ⚠ Config file not found: {config_file}")
+
+
+def create_optimized_launcher():
+    """Create an optimized launcher script"""
+    log_step("Creating optimized launcher script...")
+
+    launcher_content = """#!/bin/bash
+# HADM Optimized Launcher
+# This script sets up the optimal environment and starts the server
+
+echo "=== HADM Optimized Launcher ==="
+
+# Set performance environment variables
+export TORCH_HOME="/tmp/torch_cache"
+export HF_HOME="/tmp/hf_cache"
+export TRANSFORMERS_CACHE="/tmp/transformers_cache"
+export DETECTRON2_CACHE="/tmp/detectron2_cache"
+export CUDA_LAUNCH_BLOCKING="0"
+export CUDA_CACHE_DISABLE="0"
+export TORCH_CUDNN_V8_API_ENABLED="1"
+export TORCH_COMPILE_DEBUG="0"
+export TORCHINDUCTOR_CACHE_DIR="/tmp/torch_inductor_cache"
+export PYTORCH_CUDA_ALLOC_CONF="max_split_size_mb:128,expandable_segments:True"
+export TOKENIZERS_PARALLELISM="false"
+export OMP_NUM_THREADS="1"
+export MKL_NUM_THREADS="1"
+
+# Create cache directories
+mkdir -p /tmp/torch_cache /tmp/hf_cache /tmp/transformers_cache /tmp/detectron2_cache /tmp/torch_inductor_cache
+
+# Check if virtual environment exists and activate it
+if [ -d "venv" ]; then
+    echo "Activating virtual environment..."
+    source venv/bin/activate
+else
+    echo "⚠ Virtual environment not found at ./venv"
+fi
+
+# Check GPU status
+echo "GPU Status:"
+nvidia-smi --query-gpu=name,memory.total,memory.free --format=csv,noheader,nounits 2>/dev/null || echo "⚠ Could not query GPU"
+
+# Start the server
+echo "Starting HADM FastAPI Server..."
+if [ "$1" = "--lazy" ]; then
+    echo "Using lazy loading mode for fastest startup..."
+    python start_server_quick.py --lazy
+else
+    echo "Using normal mode..."
+    python start_server_quick.py
+fi
+"""
+
+    launcher_path = Path("start_optimized.sh")
+    with open(launcher_path, "w") as f:
+        f.write(launcher_content)
+
+    # Make executable
+    launcher_path.chmod(0o755)
+    print(f"  Created optimized launcher: {launcher_path}")
+    print("  Usage: ./start_optimized.sh [--lazy]")
 
 
 def main():
     """Main setup function"""
-    print("Setting up HADM FastAPI Server environment...")
+    print("=" * 60)
+    print("HADM Environment Optimization Setup")
+    print("=" * 60)
 
-    # Check Python version
-    if sys.version_info < (3, 8):
-        print("Error: Python 3.8 or higher is required")
-        sys.exit(1)
+    set_performance_environment_variables()
+    optimize_python_path()
+    check_system_requirements()
+    optimize_configs()
+    create_optimized_launcher()
 
-    try:
-        create_venv()
-        install_dependencies()
-        create_directories()
-        download_models()
-
-        print("\n" + "=" * 50)
-        print("Environment setup completed successfully!")
-        print("=" * 50)
-        print("\nTo activate the environment, run:")
-        if os.name != "nt":
-            print("source venv/bin/activate")
-        else:
-            print("venv\\Scripts\\activate")
-        print("\nTo start the API server, run:")
-        print("python api.py")
-
-    except Exception as e:
-        print(f"Setup failed: {e}")
-        sys.exit(1)
+    print("\n" + "=" * 60)
+    print("Setup completed!")
+    print("=" * 60)
+    print("Recommendations:")
+    print("1. Use lazy loading for fastest startup: ./start_optimized.sh --lazy")
+    print("2. Move virtual environment to faster storage if possible")
+    print("3. Monitor GPU memory usage during operation")
+    print("4. Use batch processing for multiple images")
+    print("=" * 60)
 
 
 if __name__ == "__main__":

@@ -6,6 +6,11 @@ Provides REST API endpoints for Human Artifact Detection using HADM-L and HADM-G
 
 import time
 import sys
+import argparse
+from typing import Optional, Dict, Any, List, Union
+
+# Check for lazy mode before any heavy imports
+lazy_mode = "--lazy" in sys.argv
 
 
 def log_import_time(name):
@@ -15,6 +20,10 @@ def log_import_time(name):
 
 
 print(f"[{time.strftime('%H:%M:%S.%f')[:-3]}] Starting api.py imports...")
+if lazy_mode:
+    print(
+        f"[{time.strftime('%H:%M:%S.%f')[:-3]}] LAZY MODE: Heavy imports will be deferred until first request"
+    )
 
 log_import_time("os")
 import os
@@ -31,14 +40,11 @@ import logging
 log_import_time("pathlib.Path")
 from pathlib import Path
 
-log_import_time("typing")
-from typing import Optional, Dict, Any, List
-
 log_import_time("queue.Queue")
 from queue import Queue
 
-log_import_time("threading.Thread")
-from threading import Thread
+log_import_time("threading")
+import threading
 
 log_import_time("base64")
 import base64
@@ -46,19 +52,81 @@ import base64
 log_import_time("contextlib")
 import contextlib
 
-print(f"[{time.strftime('%H:%M:%S.%f')[:-3]}] About to import torch...")
-start_torch = time.time()
-log_import_time("torch")
-import torch
+# Type hints for lazy imports
+torch: Optional[Any] = None
+np: Optional[Any] = None
+Image: Optional[Any] = None
+ImageDraw: Optional[Any] = None
+ImageFont: Optional[Any] = None
+LazyConfig: Optional[Any] = None
+instantiate: Optional[Any] = None
+setup_logger: Optional[Any] = None
+DetectionCheckpointer: Optional[Any] = None
+T: Optional[Any] = None
+ListConfig: Optional[Any] = None
+DictConfig: Optional[Any] = None
+OmegaConf: Optional[Any] = None
+xops: Optional[Any] = None
 
-torch_duration = time.time() - start_torch
-print(f"[{time.strftime('%H:%M:%S.%f')[:-3]}] torch import took {torch_duration:.2f}s")
+# Conditional heavy imports
+if not lazy_mode:
+    print(f"[{time.strftime('%H:%M:%S.%f')[:-3]}] About to import torch...")
+    start_torch = time.time()
+    log_import_time("torch")
+    import torch
 
-log_import_time("numpy")
-import numpy as np
+    torch_duration = time.time() - start_torch
+    print(
+        f"[{time.strftime('%H:%M:%S.%f')[:-3]}] torch import took {torch_duration:.2f}s"
+    )
 
-log_import_time("PIL.Image")
-from PIL import Image
+    log_import_time("numpy")
+    import numpy as np
+
+    log_import_time("PIL.Image")
+    from PIL import Image, ImageDraw, ImageFont
+
+    # Detectron2 imports
+    print(f"[{time.strftime('%H:%M:%S.%f')[:-3]}] About to import detectron2...")
+    start_detectron2 = time.time()
+
+    log_import_time("detectron2.config")
+    from detectron2.config import get_cfg, LazyConfig, instantiate
+
+    log_import_time("detectron2.engine.defaults")
+    from detectron2.engine.defaults import DefaultPredictor
+
+    log_import_time("detectron2.utils.logger")
+    from detectron2.utils.logger import setup_logger
+
+    log_import_time("detectron2.checkpoint")
+    from detectron2.checkpoint import DetectionCheckpointer
+
+    log_import_time("detectron2.data.transforms")
+    from detectron2.data import transforms as T
+
+    log_import_time("detectron2.data.detection_utils")
+    from detectron2.data.detection_utils import convert_PIL_to_numpy
+
+    log_import_time("omegaconf")
+    from omegaconf import ListConfig, DictConfig, OmegaConf
+
+    # Register OmegaConf classes as safe globals for torch.load
+    import torch.serialization
+
+    torch.serialization.add_safe_globals([ListConfig, DictConfig, OmegaConf])
+
+    detectron2_duration = time.time() - start_detectron2
+    print(
+        f"[{time.strftime('%H:%M:%S.%f')[:-3]}] detectron2 imports took {detectron2_duration:.2f}s"
+    )
+
+    try:
+        log_import_time("xformers.ops")
+        import xformers.ops as xops
+    except ImportError:
+        print("xformers not found. Some models may not work.")
+        xops = None
 
 print(f"[{time.strftime('%H:%M:%S.%f')[:-3]}] About to import uvicorn...")
 start_uvicorn = time.time()
@@ -73,7 +141,7 @@ print(
 print(f"[{time.strftime('%H:%M:%S.%f')[:-3]}] About to import fastapi...")
 start_fastapi = time.time()
 log_import_time("fastapi")
-from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks
+from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks, Request
 
 log_import_time("fastapi.responses")
 from fastapi.responses import JSONResponse
@@ -84,44 +152,15 @@ from fastapi.middleware.cors import CORSMiddleware
 log_import_time("pydantic")
 from pydantic import BaseModel, Field
 
+log_import_time("fastapi.templating")
+from fastapi.templating import Jinja2Templates
+
+log_import_time("fastapi.staticfiles")
+from fastapi.staticfiles import StaticFiles
+
 fastapi_duration = time.time() - start_fastapi
 print(
     f"[{time.strftime('%H:%M:%S.%f')[:-3]}] fastapi imports took {fastapi_duration:.2f}s"
-)
-
-log_import_time("detectron2.data.transforms")
-from detectron2.data import transforms as T
-
-log_import_time("detectron2.data.detection_utils")
-from detectron2.data.detection_utils import convert_PIL_to_numpy
-
-# Detectron2 imports
-print(f"[{time.strftime('%H:%M:%S.%f')[:-3]}] About to import detectron2...")
-start_detectron2 = time.time()
-
-log_import_time("detectron2.config")
-from detectron2.config import get_cfg, LazyConfig, instantiate
-
-log_import_time("detectron2.engine.defaults")
-from detectron2.engine.defaults import DefaultPredictor
-
-log_import_time("detectron2.utils.logger")
-from detectron2.utils.logger import setup_logger
-
-log_import_time("detectron2.checkpoint")
-from detectron2.checkpoint import DetectionCheckpointer
-
-log_import_time("omegaconf")
-from omegaconf import ListConfig, DictConfig, OmegaConf
-
-# Register OmegaConf classes as safe globals for torch.load
-import torch.serialization
-
-torch.serialization.add_safe_globals([ListConfig, DictConfig, OmegaConf])
-
-detectron2_duration = time.time() - start_detectron2
-print(
-    f"[{time.strftime('%H:%M:%S.%f')[:-3]}] detectron2 imports took {detectron2_duration:.2f}s"
 )
 
 print(f"[{time.strftime('%H:%M:%S.%f')[:-3]}] All imports completed!")
@@ -130,23 +169,105 @@ print(f"[{time.strftime('%H:%M:%S.%f')[:-3]}] All imports completed!")
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-try:
-    log_import_time("xformers.ops")
-    import xformers.ops as xops
-except ImportError:
-    logger.warning("xformers not found. Some models may not work.")
-    xops = None
-
 print(f"[{time.strftime('%H:%M:%S.%f')[:-3]}] About to create FastAPI app...")
 start_app_creation = time.time()
 
 # Global variables for models
-hadm_l_model = None
-hadm_g_model = None
-device = None
+hadm_l_model: Optional[Any] = None
+hadm_g_model: Optional[Any] = None
+device: Optional[Any] = None
 request_queue = Queue()
 is_processing = False
 models_loading = False
+heavy_imports_loaded = not lazy_mode
+
+
+def ensure_heavy_imports():
+    """Ensure heavy imports are loaded - decorator-friendly version"""
+    if lazy_mode and not heavy_imports_loaded:
+        load_heavy_imports()
+
+
+def load_heavy_imports():
+    """Load heavy imports when in lazy mode"""
+    global torch, np, Image, ImageDraw, ImageFont, LazyConfig, instantiate
+    global setup_logger, DetectionCheckpointer, T, ListConfig, DictConfig, OmegaConf, xops
+    global heavy_imports_loaded
+
+    if heavy_imports_loaded:
+        return
+
+    logger.info("Loading heavy imports (torch, detectron2, etc.)...")
+    start_heavy = time.time()
+
+    try:
+        import torch as torch_module
+        import numpy as numpy_module
+        from PIL import (
+            Image as PIL_Image,
+            ImageDraw as PIL_ImageDraw,
+            ImageFont as PIL_ImageFont,
+        )
+        from detectron2.config import (
+            LazyConfig as D2_LazyConfig,
+            instantiate as D2_instantiate,
+        )
+        from detectron2.utils.logger import setup_logger as D2_setup_logger
+        from detectron2.checkpoint import (
+            DetectionCheckpointer as D2_DetectionCheckpointer,
+        )
+        from detectron2.data import transforms as D2_T
+        from omegaconf import (
+            ListConfig as OC_ListConfig,
+            DictConfig as OC_DictConfig,
+            OmegaConf as OC_OmegaConf,
+        )
+
+        # Assign to global variables
+        torch = torch_module
+        np = numpy_module
+        Image = PIL_Image
+        ImageDraw = PIL_ImageDraw
+        ImageFont = PIL_ImageFont
+        LazyConfig = D2_LazyConfig
+        instantiate = D2_instantiate
+        setup_logger = D2_setup_logger
+        DetectionCheckpointer = D2_DetectionCheckpointer
+        T = D2_T
+        ListConfig = OC_ListConfig
+        DictConfig = OC_DictConfig
+        OmegaConf = OC_OmegaConf
+
+        # Register OmegaConf classes as safe globals for torch.load
+        import torch.serialization
+
+        torch.serialization.add_safe_globals([ListConfig, DictConfig, OmegaConf])
+
+        try:
+            import xformers.ops as xformers_ops
+
+            xops = xformers_ops
+        except ImportError:
+            logger.warning("xformers not found. Some models may not work.")
+            xops = None
+
+        heavy_imports_loaded = True
+        duration = time.time() - start_heavy
+        logger.info(f"Heavy imports loaded in {duration:.2f}s")
+
+    except Exception as e:
+        logger.error(f"Failed to load heavy imports: {e}")
+        raise RuntimeError(f"Critical imports failed: {e}")
+
+
+def trigger_lazy_load():
+    """If in lazy mode and models are not loaded, load them. This is blocking."""
+    with threading.Lock():
+        if lazy_mode and (hadm_l_model is None or hadm_g_model is None):
+            logger.info(
+                "Lazy loading triggered by first request. This will take a moment..."
+            )
+            load_models()
 
 
 # Utility context manager for timing steps with logging
@@ -186,6 +307,7 @@ app = FastAPI(
     docs_url="/docs",
     redoc_url="/redoc",
 )
+app.state.lazy_mode = lazy_mode
 
 app_creation_duration = time.time() - start_app_creation
 print(
@@ -209,12 +331,26 @@ print(
     f"[{time.strftime('%H:%M:%S.%f')[:-3]}] CORS middleware took {cors_duration:.2f}s"
 )
 
+# Setup templates and static files
+print(f"[{time.strftime('%H:%M:%S.%f')[:-3]}] Setting up templates and static files...")
+templates = Jinja2Templates(directory="templates")
+
+# Create static and templates directories if they don't exist
+os.makedirs("static", exist_ok=True)
+os.makedirs("templates", exist_ok=True)
+
+# Mount static files
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
 print(f"[{time.strftime('%H:%M:%S.%f')[:-3]}] Defining functions...")
 
 
 def load_hadm_model(config_path: str, model_path: str, model_name: str):
     """Load a HADM model using LazyConfig"""
     try:
+        # Ensure heavy imports are loaded
+        ensure_heavy_imports()
+
         logger.info(f"Loading {model_name} model from {model_path}...")
 
         # Check if files exist
@@ -292,7 +428,7 @@ def load_hadm_model(config_path: str, model_path: str, model_name: str):
                 self.aug = T.ResizeShortestEdge(short_edge_length=1024, max_size=1024)
                 self.input_format = "BGR"  # detectron2 default
 
-            def __call__(self, image_bgr: np.ndarray):
+            def __call__(self, image_bgr):
                 with torch.no_grad():
                     # Apply pre-processing to image.
                     height, width = image_bgr.shape[:2]
@@ -329,6 +465,9 @@ def load_models():
     models_loading = True
 
     try:
+        # Ensure heavy imports are loaded
+        ensure_heavy_imports()
+
         logger.info("Loading HADM models into VRAM...")
 
         # Setup detectron2 logger
@@ -392,8 +531,11 @@ def load_models():
         models_loading = False
 
 
-def preprocess_image(image: Image.Image) -> np.ndarray:
+def preprocess_image(image):
     """Preprocess image for detectron2 inference"""
+    # Ensure heavy imports are loaded
+    ensure_heavy_imports()
+
     # Convert to RGB if needed
     if image.mode != "RGB":
         image = image.convert("RGB")
@@ -405,8 +547,11 @@ def preprocess_image(image: Image.Image) -> np.ndarray:
     return image_bgr
 
 
-def run_hadm_l_inference(image_array: np.ndarray) -> List[DetectionResult]:
+def run_hadm_l_inference(image_array) -> List[DetectionResult]:
     """Run HADM-L (Local) inference on image"""
+    # Ensure heavy imports are loaded
+    ensure_heavy_imports()
+
     if hadm_l_model is None:
         logger.error("HADM-L model not loaded")
         return []
@@ -460,8 +605,11 @@ def run_hadm_l_inference(image_array: np.ndarray) -> List[DetectionResult]:
         return []
 
 
-def run_hadm_g_inference(image_array: np.ndarray) -> List[DetectionResult]:
+def run_hadm_g_inference(image_array) -> List[DetectionResult]:
     """Run HADM-G (Global) inference on image"""
+    # Ensure heavy imports are loaded
+    ensure_heavy_imports()
+
     if hadm_g_model is None:
         logger.error("HADM-G model not loaded")
         return []
@@ -521,9 +669,120 @@ def run_hadm_g_inference(image_array: np.ndarray) -> List[DetectionResult]:
         return []
 
 
-def process_inference_request(image: Image.Image, mode: str) -> InferenceResponse:
+def draw_bounding_boxes(
+    image,
+    local_detections: List[DetectionResult],
+    global_detections: List[DetectionResult],
+):
+    """Draw bounding boxes and labels on the image"""
+    # Ensure heavy imports are loaded
+    ensure_heavy_imports()
+
+    # Create a copy of the image to draw on
+    img_with_boxes = image.copy()
+    draw = ImageDraw.Draw(img_with_boxes)
+
+    # Try to use a better font, fall back to default if not available
+    try:
+        font = ImageFont.truetype(
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 16
+        )
+        small_font = ImageFont.truetype(
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 12
+        )
+    except (OSError, IOError):
+        try:
+            font = ImageFont.load_default()
+            small_font = ImageFont.load_default()
+        except:
+            font = None
+            small_font = None
+
+    # Draw local detections in red
+    for detection in local_detections:
+        bbox = detection.bbox
+        x1, y1, x2, y2 = bbox
+
+        # Draw bounding box
+        draw.rectangle([x1, y1, x2, y2], outline="red", width=3)
+
+        # Prepare label text
+        label = f"LOCAL: {detection.class_name}"
+        confidence_text = f"Conf: {detection.confidence:.2f}"
+
+        # Draw label background
+        if font:
+            label_bbox = draw.textbbox((x1, y1 - 30), label, font=font)
+            conf_bbox = draw.textbbox((x1, y1 - 15), confidence_text, font=small_font)
+        else:
+            label_bbox = draw.textbbox((x1, y1 - 30), label)
+            conf_bbox = draw.textbbox((x1, y1 - 15), confidence_text)
+
+        draw.rectangle(
+            [
+                label_bbox[0] - 2,
+                label_bbox[1] - 2,
+                max(label_bbox[2], conf_bbox[2]) + 2,
+                conf_bbox[3] + 2,
+            ],
+            fill="red",
+        )
+
+        # Draw label text
+        if font:
+            draw.text((x1, y1 - 30), label, fill="white", font=font)
+            draw.text((x1, y1 - 15), confidence_text, fill="white", font=small_font)
+        else:
+            draw.text((x1, y1 - 30), label, fill="white")
+            draw.text((x1, y1 - 15), confidence_text, fill="white")
+
+    # Draw global detections in blue
+    for detection in global_detections:
+        bbox = detection.bbox
+        x1, y1, x2, y2 = bbox
+
+        # Draw bounding box
+        draw.rectangle([x1, y1, x2, y2], outline="blue", width=3)
+
+        # Prepare label text
+        label = f"GLOBAL: {detection.class_name}"
+        confidence_text = f"Conf: {detection.confidence:.2f}"
+
+        # Draw label background
+        if font:
+            label_bbox = draw.textbbox((x1, y1 - 30), label, font=font)
+            conf_bbox = draw.textbbox((x1, y1 - 15), confidence_text, font=small_font)
+        else:
+            label_bbox = draw.textbbox((x1, y1 - 30), label)
+            conf_bbox = draw.textbbox((x1, y1 - 15), confidence_text)
+
+        draw.rectangle(
+            [
+                label_bbox[0] - 2,
+                label_bbox[1] - 2,
+                max(label_bbox[2], conf_bbox[2]) + 2,
+                conf_bbox[3] + 2,
+            ],
+            fill="blue",
+        )
+
+        # Draw label text
+        if font:
+            draw.text((x1, y1 - 30), label, fill="white", font=font)
+            draw.text((x1, y1 - 15), confidence_text, fill="white", font=small_font)
+        else:
+            draw.text((x1, y1 - 30), label, fill="white")
+            draw.text((x1, y1 - 15), confidence_text, fill="white")
+
+    return img_with_boxes
+
+
+def process_inference_request(image, mode: str) -> InferenceResponse:
     """Process a single inference request"""
     import time
+
+    # Ensure heavy imports are loaded
+    ensure_heavy_imports()
 
     with log_time(f"Inference request ({mode})"):
         start_time = time.time()
@@ -586,12 +845,18 @@ async def health_check():
     """Health check endpoint"""
     return {
         "status": "healthy",
+        "lazy_mode": lazy_mode,
+        "heavy_imports_loaded": heavy_imports_loaded,
         "models_loaded": hadm_l_model is not None and hadm_g_model is not None,
         "models_loading": models_loading,
-        "gpu_available": torch.cuda.is_available(),
+        "gpu_available": (
+            torch.cuda.is_available() if heavy_imports_loaded else "unknown"
+        ),
         "device": str(device) if device else "not_set",
         "gpu_memory_gb": (
-            torch.cuda.memory_allocated() / 1024**3 if torch.cuda.is_available() else 0
+            torch.cuda.memory_allocated() / 1024**3
+            if heavy_imports_loaded and torch.cuda.is_available()
+            else 0
         ),
     }
 
@@ -610,6 +875,7 @@ async def detect_artifacts(
     Returns:
         Detection results with bounding boxes and artifact information
     """
+    trigger_lazy_load()
 
     # Check if models are still loading
     if models_loading:
@@ -642,6 +908,9 @@ async def detect_artifacts(
         raise HTTPException(status_code=400, detail="File must be an image")
 
     try:
+        # Ensure heavy imports are loaded
+        ensure_heavy_imports()
+
         # Read image
         image_data = await file.read()
         image = Image.open(io.BytesIO(image_data))
@@ -718,28 +987,138 @@ async def reload_models():
     }
 
 
+@app.get("/interface")
+async def web_interface(request: Request):
+    """Web interface for uploading images and viewing detection results"""
+    return templates.TemplateResponse("interface.html", {"request": request})
+
+
+@app.post("/interface/detect")
+async def web_detect_artifacts(
+    request: Request, file: UploadFile = File(...), mode: str = "both"
+):
+    """
+    Web interface endpoint for artifact detection with visual results
+    """
+    trigger_lazy_load()
+
+    # Check if models are still loading
+    if models_loading:
+        return templates.TemplateResponse(
+            "interface.html",
+            {
+                "request": request,
+                "error": "Models are still loading. Please try again in a few moments.",
+            },
+        )
+
+    # Check if required models are loaded
+    if mode in ["local", "both"] and hadm_l_model is None:
+        return templates.TemplateResponse(
+            "interface.html",
+            {
+                "request": request,
+                "error": "HADM-L model not loaded. Please check model status.",
+            },
+        )
+
+    if mode in ["global", "both"] and hadm_g_model is None:
+        return templates.TemplateResponse(
+            "interface.html",
+            {
+                "request": request,
+                "error": "HADM-G model not loaded. Please check model status.",
+            },
+        )
+
+    # Validate mode
+    if mode not in ["local", "global", "both"]:
+        return templates.TemplateResponse(
+            "interface.html",
+            {"request": request, "error": "Mode must be 'local', 'global', or 'both'"},
+        )
+
+    # Validate file type
+    if not file.content_type or not file.content_type.startswith("image/"):
+        return templates.TemplateResponse(
+            "interface.html", {"request": request, "error": "File must be an image"}
+        )
+
+    try:
+        # Ensure heavy imports are loaded
+        ensure_heavy_imports()
+
+        # Read and process image
+        image_data = await file.read()
+        image = Image.open(io.BytesIO(image_data))
+
+        # Process inference
+        result = process_inference_request(image, mode)
+
+        if result.success:
+            # Draw bounding boxes on the image
+            img_with_boxes = draw_bounding_boxes(
+                image, result.local_detections or [], result.global_detections or []
+            )
+
+            # Save the image with bounding boxes
+            img_buffer = io.BytesIO()
+            img_with_boxes.save(img_buffer, format="PNG")
+            img_buffer.seek(0)
+
+            # Convert to base64 for display
+            img_base64 = base64.b64encode(img_buffer.getvalue()).decode()
+
+            return templates.TemplateResponse(
+                "interface.html",
+                {
+                    "request": request,
+                    "result": result,
+                    "image_base64": img_base64,
+                    "original_filename": file.filename,
+                    "mode": mode,
+                },
+            )
+        else:
+            return templates.TemplateResponse(
+                "interface.html", {"request": request, "error": result.message}
+            )
+
+    except Exception as e:
+        logger.error(f"Web detection endpoint failed: {e}")
+        return templates.TemplateResponse(
+            "interface.html",
+            {"request": request, "error": f"Detection failed: {str(e)}"},
+        )
+
+
 # Startup event
 @app.on_event("startup")
 async def startup_event():
     """Initialize models on startup"""
     logger.info("Starting HADM FastAPI Server...")
-    logger.info("Server is ready to accept requests. Models will load in background...")
 
-    # Load models in background thread to avoid blocking startup
-    def load_models_background():
-        success = load_models()
-        if not success:
-            logger.error("Failed to load models in background")
-        else:
-            logger.info("HADM models loaded successfully in background")
+    if lazy_mode:
+        logger.info("LAZY MODE: Server is ready. Models will load on first request.")
+        logger.info("HADM FastAPI Server started successfully in lazy mode")
+    else:
+        logger.info(
+            "Server is ready to accept requests. Models will load in background..."
+        )
 
-    # Start model loading in background
-    import threading
+        # Load models in background thread to avoid blocking startup
+        def load_models_background():
+            success = load_models()
+            if not success:
+                logger.error("Failed to load models in background")
+            else:
+                logger.info("HADM models loaded successfully in background")
 
-    model_thread = threading.Thread(target=load_models_background, daemon=True)
-    model_thread.start()
+        # Start model loading in background
+        model_thread = threading.Thread(target=load_models_background, daemon=True)
+        model_thread.start()
 
-    logger.info("HADM FastAPI Server started successfully")
+        logger.info("HADM FastAPI Server started successfully")
 
 
 if __name__ == "__main__":
