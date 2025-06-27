@@ -1,0 +1,6 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+This is an existing project that allows for the loading of pretrained models under ./pretrained_models. The /demo directory contains useful examples of how to train models (which we're not interested in), and inferencing a model (the main focus of all our efforts). Our end goal is to setup a fastapi server that can receive requests to check for artifacts (global/local/both) for HADM, continuously keep the models in vram, and queue these requests before returning them. In these requests we'll want to return ALL possible information we can, for this we'll have to research what the models can detect and output. We have test images in /test_images. We must also setup a venv we can use, and must keep a single script that will setup the environment if not existing, install all the packages, downlaods the models, and eventually loads the fastapi uvicorn server, with /docs endpoints, including swagger ui. The server must also load the models into vram, the HADM L and G and whatever else they need. We always use port 8080, and you must always assume we have a server started somewhere.

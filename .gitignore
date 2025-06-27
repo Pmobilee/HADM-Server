@@ -67,3 +67,5 @@ make_*.py
 demo/outputs/*
 .eggs/
 !figure/teaser.png
+venv/
+
