@@ -1,20 +1,64 @@
+# Core ML and Vision Libraries
+torch>=2.0.0
+torchvision>=0.15.0
+numpy>=1.21.0
+opencv-python>=4.8.0
+Pillow>=9.1.0
+scipy>=1.8.0
+
+# Detectron2 Dependencies
+fvcore>=0.1.5
+iopath>=0.1.9
+pycocotools>=2.0.6
+yacs>=0.1.8
+omegaconf>=2.1.0
+hydra-core>=1.1.0
+
+# FastAPI and Server Dependencies
+fastapi>=0.100.0
+uvicorn[standard]>=0.20.0
+python-multipart>=0.0.6
+aiofiles>=23.0.0
+pydantic>=2.0.0
+starlette>=0.27.0
+
+# Computer Vision and ML Utilities
 timm==0.5.4
-Pillow==9.1.0
-blobfile
-mypy
-numpy
-pytest
-requests
-einops
-tensorboardX
-deepspeed==0.6.5
-scipy
-sh
-wandb
-ftfy
-regex
-opencv-python
-triton
-cryptography
-ninja
-apex
+einops>=0.6.0
+tensorboard>=2.10.0
+tensorboardX>=2.5.0
+matplotlib>=3.5.0
+tqdm>=4.64.0
+
+# Data Processing
+pandas>=1.5.0
+requests>=2.28.0
+PyYAML>=6.0.0
+
+# Development and Testing
+pytest>=7.0.0
+mypy>=1.0.0
+black>=22.0.0
+
+# Optional but Recommended
+# Uncomment if using these features:
+# wandb>=0.13.0  # For experiment tracking
+# deepspeed>=0.6.0  # For distributed training (if needed)
+# ninja>=1.10.0  # For faster compilation
+# apex  # For mixed precision training (install separately)
+
+# System Dependencies
+cryptography>=3.4.0
+packaging>=21.0
+setuptools>=60.0.0
+
+# MMCV (Computer Vision Library)
+mmcv>=1.7.0
+openmim>=0.3.0
+
+# Additional utilities
+ftfy>=6.0.0
+regex>=2022.0.0
+sh>=1.14.0
+blobfile>=2.0.0
+triton>=2.0.0

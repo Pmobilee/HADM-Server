@@ -13,6 +13,8 @@ from typing import Optional, Dict, Any, List
 from queue import Queue
 from threading import Thread
 import base64
+import time
+import contextlib
 
 import torch
 import numpy as np
@@ -24,10 +26,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 # Detectron2 imports
-from detectron2.config import get_cfg, LazyConfig
+from detectron2.config import get_cfg, LazyConfig, instantiate
 from detectron2.engine.defaults import DefaultPredictor
 from detectron2.data.detection_utils import read_image
 from detectron2.utils.logger import setup_logger
+from detectron2.checkpoint import DetectionCheckpointer
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -39,6 +42,19 @@ hadm_g_model = None
 device = None
 request_queue = Queue()
 is_processing = False
+models_loading = False
+
+
+# Utility context manager for timing steps with logging
+@contextlib.contextmanager
+def log_time(step: str):
+    start = time.time()
+    logger.info(f"[TIMING] {step} - started")
+    try:
+        yield
+    finally:
+        duration = time.time() - start
+        logger.info(f"[TIMING] {step} - completed in {duration:.2f}s")
 
 
 # Response models
@@ -78,80 +94,175 @@ app.add_middleware(
 
 
 def load_hadm_model(config_path: str, model_path: str, model_name: str):
-    """Load a HADM model using detectron2 LazyConfig"""
+    """Load a HADM model using LazyConfig"""
     try:
-        logger.info(f"Loading {model_name} model...")
+        logger.info(f"Loading {model_name} model from {model_path}...")
 
-        # Load config
-        cfg = LazyConfig.load_config(config_path)
+        # Check if files exist
+        if not Path(config_path).exists():
+            logger.error(f"Config file not found: {config_path}")
+            return None
 
-        # Set the model checkpoint path
-        cfg.train.init_checkpoint = model_path
+        if not Path(model_path).exists():
+            logger.error(f"Model file not found: {model_path}")
+            return None
 
-        # Create predictor
-        predictor = DefaultPredictor(LazyConfig.instantiate(cfg))
+        # Load LazyConfig
+        with log_time(f"{model_name} -> Load LazyConfig"):
+            cfg = LazyConfig.load(config_path)
+        logger.info(f"Config loaded successfully for {model_name}")
+
+        # Update model checkpoint path
+        if hasattr(cfg, "train") and hasattr(cfg.train, "init_checkpoint"):
+            cfg.train.init_checkpoint = str(
+                Path("pretrained_models/eva02_L_coco_det_sys_o365.pth")
+            )
+            logger.info(f"Updated init_checkpoint for {model_name}")
+
+        # Set device for training config
+        if hasattr(cfg, "train"):
+            cfg.train.device = str(device)
+            logger.info(f"Set device to {device} for {model_name}")
+
+        logger.info(f"About to instantiate model for {model_name}...")
+
+        # Instantiate model
+        with log_time(f"{model_name} -> Instantiate model"):
+            model = instantiate(cfg.model)
+            model.to(device)
+            model.eval()
+
+        # Load the HADM checkpoint with safe globals for OmegaConf
+        import torch.serialization
+        from omegaconf import ListConfig, DictConfig, OmegaConf
+
+        with log_time(f"{model_name} -> Load checkpoint"):
+            with torch.serialization.safe_globals([ListConfig, DictConfig, OmegaConf]):
+                checkpointer = DetectionCheckpointer(model)
+                try:
+                    checkpointer.load(model_path)
+                except Exception as e:
+                    logger.warning(
+                        f"Safe checkpoint load failed: {e}. Retrying with weights_only=False (trusted source)."
+                    )
+                    checkpointer.load(model_path, weights_only=False)
 
         logger.info(f"{model_name} model loaded successfully")
+        logger.info(
+            f"GPU memory allocated: {torch.cuda.memory_allocated() / 1024**3:.2f} GB"
+        )
+
+        # Create predictor-like wrapper
+        class HADMPredictor:
+            def __init__(self, model, cfg, model_name):
+                self.model = model
+                self.cfg = cfg
+                self.model_name = model_name
+                self.input_format = "BGR"  # detectron2 default
+
+            def __call__(self, image):
+                # Ensure image is in correct format (BGR numpy array)
+                if len(image.shape) == 3:
+                    height, width = image.shape[:2]
+
+                    # Create input dict in detectron2 format
+                    inputs = {
+                        "image": torch.as_tensor(
+                            image.astype("float32").transpose(2, 0, 1)
+                        ).to(device),
+                        "height": height,
+                        "width": width,
+                    }
+
+                    with torch.no_grad():
+                        predictions = self.model([inputs])
+                        return predictions[0]
+                else:
+                    raise ValueError(f"Invalid image shape: {image.shape}")
+
+        predictor = HADMPredictor(model, cfg, model_name)
         return predictor
 
     except Exception as e:
         logger.error(f"Failed to load {model_name} model: {e}")
+        import traceback
+
+        logger.error(f"Traceback: {traceback.format_exc()}")
         return None
 
 
 def load_models():
     """Load HADM-L and HADM-G models into VRAM"""
-    global hadm_l_model, hadm_g_model, device
+    global hadm_l_model, hadm_g_model, device, models_loading
 
-    logger.info("Loading HADM models into VRAM...")
-
-    # Setup detectron2 logger
-    setup_logger()
-
-    # Check for CUDA availability
-    if torch.cuda.is_available():
-        device = torch.device("cuda")
-        logger.info(f"Using GPU: {torch.cuda.get_device_name()}")
-    else:
-        device = torch.device("cpu")
-        logger.warning("CUDA not available, using CPU")
-
-    # Check for model files
-    model_dir = Path("pretrained_models")
-    hadm_l_path = model_dir / "HADM-L_0249999.pth"
-    hadm_g_path = model_dir / "HADM-G_0249999.pth"
-    eva_path = model_dir / "eva02_L_coco_det_sys_o365.pth"
-
-    if not hadm_l_path.exists():
-        logger.error(f"HADM-L model not found at {hadm_l_path}")
+    if models_loading:
+        logger.info("Models are already being loaded...")
         return False
 
-    if not hadm_g_path.exists():
-        logger.error(f"HADM-G model not found at {hadm_g_path}")
-        return False
-
-    if not eva_path.exists():
-        logger.error(f"EVA-02-L model not found at {eva_path}")
-        return False
+    models_loading = True
 
     try:
+        logger.info("Loading HADM models into VRAM...")
+
+        # Setup detectron2 logger
+        setup_logger()
+
+        # Check for CUDA availability
+        if torch.cuda.is_available():
+            device = torch.device("cuda")
+            logger.info(f"Using GPU: {torch.cuda.get_device_name()}")
+            logger.info(
+                f"Initial GPU memory: {torch.cuda.memory_allocated() / 1024**3:.2f} GB"
+            )
+        else:
+            device = torch.device("cpu")
+            logger.warning("CUDA not available, using CPU")
+
+        # Check for model files
+        model_dir = Path("pretrained_models")
+        hadm_l_path = model_dir / "HADM-L_0249999.pth"
+        hadm_g_path = model_dir / "HADM-G_0249999.pth"
+        eva_path = model_dir / "eva02_L_coco_det_sys_o365.pth"
+
+        if not hadm_l_path.exists():
+            logger.error(f"HADM-L model not found at {hadm_l_path}")
+            return False
+
+        if not hadm_g_path.exists():
+            logger.error(f"HADM-G model not found at {hadm_g_path}")
+            return False
+
+        if not eva_path.exists():
+            logger.error(f"EVA-02-L model not found at {eva_path}")
+            return False
+
         # Load HADM-L model
         hadm_l_config = "projects/ViTDet/configs/eva2_o365_to_coco/demo_local.py"
-        hadm_l_model = load_hadm_model(hadm_l_config, str(hadm_l_path), "HADM-L")
+        with log_time("Total HADM-L load time"):
+            hadm_l_model = load_hadm_model(hadm_l_config, str(hadm_l_path), "HADM-L")
 
         # Load HADM-G model
         hadm_g_config = "projects/ViTDet/configs/eva2_o365_to_coco/demo_global.py"
-        hadm_g_model = load_hadm_model(hadm_g_config, str(hadm_g_path), "HADM-G")
+        with log_time("Total HADM-G load time"):
+            hadm_g_model = load_hadm_model(hadm_g_config, str(hadm_g_path), "HADM-G")
 
         if hadm_l_model is None or hadm_g_model is None:
             return False
 
-        logger.info("Models loaded successfully into VRAM")
+        logger.info("All models loaded successfully into VRAM")
+        logger.info(
+            f"Total GPU memory allocated: {torch.cuda.memory_allocated() / 1024**3:.2f} GB"
+        )
         return True
 
     except Exception as e:
         logger.error(f"Failed to load models: {e}")
+        import traceback
+
+        logger.error(f"Traceback: {traceback.format_exc()}")
         return False
+    finally:
+        models_loading = False
 
 
 def preprocess_image(image: Image.Image) -> np.ndarray:
@@ -168,9 +279,7 @@ def preprocess_image(image: Image.Image) -> np.ndarray:
 
 
 def run_hadm_l_inference(image_array: np.ndarray) -> List[DetectionResult]:
-    """Run HADM-L (Local) inference"""
-    global hadm_l_model
-
+    """Run HADM-L (Local) inference on image"""
     if hadm_l_model is None:
         logger.error("HADM-L model not loaded")
         return []
@@ -179,9 +288,8 @@ def run_hadm_l_inference(image_array: np.ndarray) -> List[DetectionResult]:
         # Run inference
         predictions = hadm_l_model(image_array)
 
-        # Convert predictions to DetectionResult format
         results = []
-        if "instances" in predictions:
+        if "instances" in predictions and len(predictions["instances"]) > 0:
             instances = predictions["instances"]
             boxes = instances.pred_boxes.tensor.cpu().numpy()
             scores = instances.scores.cpu().numpy()
@@ -192,15 +300,28 @@ def run_hadm_l_inference(image_array: np.ndarray) -> List[DetectionResult]:
                 confidence = float(scores[i])
                 class_id = int(classes[i])
 
+                # HADM-L class mapping (based on LOCAL_HUMAN_ARTIFACT_CATEGORIES)
+                class_names = {
+                    0: "face",
+                    1: "torso",
+                    2: "arm",
+                    3: "leg",
+                    4: "hand",
+                    5: "feet",
+                }
+
                 results.append(
                     DetectionResult(
                         bbox=bbox,
                         confidence=confidence,
-                        class_name=f"local_artifact_class_{class_id}",
+                        class_name=class_names.get(
+                            class_id, f"local_artifact_class_{class_id}"
+                        ),
                         artifacts={
                             "class_id": class_id,
                             "type": "local_artifact",
                             "detection_method": "HADM-L",
+                            "bbox_area": (bbox[2] - bbox[0]) * (bbox[3] - bbox[1]),
                         },
                     )
                 )
@@ -213,9 +334,7 @@ def run_hadm_l_inference(image_array: np.ndarray) -> List[DetectionResult]:
 
 
 def run_hadm_g_inference(image_array: np.ndarray) -> List[DetectionResult]:
-    """Run HADM-G (Global) inference"""
-    global hadm_g_model
-
+    """Run HADM-G (Global) inference on image"""
     if hadm_g_model is None:
         logger.error("HADM-G model not loaded")
         return []
@@ -224,9 +343,8 @@ def run_hadm_g_inference(image_array: np.ndarray) -> List[DetectionResult]:
         # Run inference
         predictions = hadm_g_model(image_array)
 
-        # Convert predictions to DetectionResult format
         results = []
-        if "instances" in predictions:
+        if "instances" in predictions and len(predictions["instances"]) > 0:
             instances = predictions["instances"]
             boxes = instances.pred_boxes.tensor.cpu().numpy()
             scores = instances.scores.cpu().numpy()
@@ -237,15 +355,34 @@ def run_hadm_g_inference(image_array: np.ndarray) -> List[DetectionResult]:
                 confidence = float(scores[i])
                 class_id = int(classes[i])
 
+                # HADM-G class mapping (based on GLOBAL_HUMAN_ARTIFACT_CATEGORIES)
+                class_names = {
+                    0: "human missing arm",
+                    1: "human missing face",
+                    2: "human missing feet",
+                    3: "human missing hand",
+                    4: "human missing leg",
+                    5: "human missing torso",
+                    6: "human with extra arm",
+                    7: "human with extra face",
+                    8: "human with extra feet",
+                    9: "human with extra hand",
+                    10: "human with extra leg",
+                    11: "human with extra torso",
+                }
+
                 results.append(
                     DetectionResult(
                         bbox=bbox,
                         confidence=confidence,
-                        class_name=f"global_artifact_class_{class_id}",
+                        class_name=class_names.get(
+                            class_id, f"global_artifact_class_{class_id}"
+                        ),
                         artifacts={
                             "class_id": class_id,
                             "type": "global_artifact",
                             "detection_method": "HADM-G",
+                            "bbox_area": (bbox[2] - bbox[0]) * (bbox[3] - bbox[1]),
                         },
                     )
                 )
@@ -261,7 +398,8 @@ def process_inference_request(image: Image.Image, mode: str) -> InferenceRespons
     """Process a single inference request"""
     import time
 
-    start_time = time.time()
+    with log_time(f"Inference request ({mode})"):
+        start_time = time.time()
 
     try:
         # Preprocess image
@@ -278,6 +416,10 @@ def process_inference_request(image: Image.Image, mode: str) -> InferenceRespons
             global_detections = run_hadm_g_inference(image_array)
 
         processing_time = time.time() - start_time
+
+        logger.info(
+            f"[TIMING] Inference request ({mode}) - completed in {processing_time:.2f}s"
+        )
 
         return InferenceResponse(
             success=True,
@@ -318,8 +460,12 @@ async def health_check():
     return {
         "status": "healthy",
         "models_loaded": hadm_l_model is not None and hadm_g_model is not None,
+        "models_loading": models_loading,
         "gpu_available": torch.cuda.is_available(),
         "device": str(device) if device else "not_set",
+        "gpu_memory_gb": (
+            torch.cuda.memory_allocated() / 1024**3 if torch.cuda.is_available() else 0
+        ),
     }
 
 
@@ -337,6 +483,26 @@ async def detect_artifacts(
     Returns:
         Detection results with bounding boxes and artifact information
     """
+
+    # Check if models are still loading
+    if models_loading:
+        raise HTTPException(
+            status_code=503,
+            detail="Models are still loading. Please try again in a few moments.",
+        )
+
+    # Check if required models are loaded
+    if mode in ["local", "both"] and hadm_l_model is None:
+        raise HTTPException(
+            status_code=503,
+            detail="HADM-L model not loaded. Please check model status.",
+        )
+
+    if mode in ["global", "both"] and hadm_g_model is None:
+        raise HTTPException(
+            status_code=503,
+            detail="HADM-G model not loaded. Please check model status.",
+        )
 
     # Validate mode
     if mode not in ["local", "global", "both"]:
@@ -400,8 +566,16 @@ async def models_status():
     return {
         "hadm_l_loaded": hadm_l_model is not None,
         "hadm_g_loaded": hadm_g_model is not None,
+        "models_loading": models_loading,
         "device": str(device) if device else "not_set",
-        "gpu_memory": torch.cuda.memory_allocated() if torch.cuda.is_available() else 0,
+        "gpu_memory_gb": (
+            torch.cuda.memory_allocated() / 1024**3 if torch.cuda.is_available() else 0
+        ),
+        "gpu_memory_total_gb": (
+            torch.cuda.get_device_properties(0).total_memory / 1024**3
+            if torch.cuda.is_available()
+            else 0
+        ),
     }
 
 
@@ -422,13 +596,23 @@ async def reload_models():
 async def startup_event():
     """Initialize models on startup"""
     logger.info("Starting HADM FastAPI Server...")
+    logger.info("Server is ready to accept requests. Models will load in background...")
 
-    # Load models
-    success = load_models()
-    if not success:
-        logger.error("Failed to load models on startup")
-    else:
-        logger.info("HADM FastAPI Server started successfully")
+    # Load models in background thread to avoid blocking startup
+    def load_models_background():
+        success = load_models()
+        if not success:
+            logger.error("Failed to load models in background")
+        else:
+            logger.info("HADM models loaded successfully in background")
+
+    # Start model loading in background
+    import threading
+
+    model_thread = threading.Thread(target=load_models_background, daemon=True)
+    model_thread.start()
+
+    logger.info("HADM FastAPI Server started successfully")
 
 
 if __name__ == "__main__":

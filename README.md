@@ -57,13 +57,17 @@ After setting up the environment, start the FastAPI server:
 
 ```bash
 source venv/bin/activate  # Activate the environment
-python api.py             # Start the server
+python start_server.py    # Check dependencies and start server
+# OR
+python api.py             # Start server directly
 ```
 
 The server will:
-1. Load HADM-L and HADM-G models into VRAM
-2. Start FastAPI with Uvicorn on port 8080
-3. Provide API endpoints for artifact detection
+1. Start FastAPI with Uvicorn on port 8080 immediately
+2. Load HADM-L and HADM-G models into VRAM in the background
+3. Provide API endpoints for artifact detection once models are loaded
+
+**Note**: The server starts quickly but models load in the background. Use `/models/status` endpoint to monitor loading progress.
 
 ### API Endpoints
 
@@ -71,14 +75,28 @@ Once the server is running, you can access:
 
 - **API Documentation**: `http://localhost:8080/docs` (Swagger UI)
 - **Alternative Docs**: `http://localhost:8080/redoc`
+- **Health Check**: `http://localhost:8080/health` - Server and model status
+- **Model Status**: `http://localhost:8080/models/status` - Detailed model loading information
 
 ### Inference Modes
 
 The server supports two detection modes:
 
-- **Local Detection (HADM-L)**: Detects localized artifacts in specific regions
-- **Global Detection (HADM-G)**: Detects global image-level artifacts
+- **Local Detection (HADM-L)**: Detects localized artifacts in specific body parts (face, torso, arm, leg, hand, feet)
+- **Global Detection (HADM-G)**: Detects global human-level artifacts (missing/extra body parts)
 - **Combined Detection**: Returns results from both models
+
+#### HADM-L Classes
+- `face` - Facial artifacts
+- `torso` - Torso/body artifacts  
+- `arm` - Arm artifacts
+- `leg` - Leg artifacts
+- `hand` - Hand artifacts
+- `feet` - Feet artifacts
+
+#### HADM-G Classes
+- `human missing [body_part]` - Missing body parts
+- `human with extra [body_part]` - Extra body parts
 
 ### Input Requirements
 
