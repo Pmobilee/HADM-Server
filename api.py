@@ -283,20 +283,35 @@ def load_hadm_model(config_path: str, model_path: str, model_name: str):
         class HADMPredictor:
             def __init__(self, model, cfg):
                 self.model = model
-                self.cfg = cfg.clone()
+                # For OmegaConf, use copy() instead of clone()
+                from copy import deepcopy
+
+                self.cfg = deepcopy(cfg)
                 self.model.eval()
 
                 # Get the resizing augmentation from the config
-                self.aug = T.ResizeShortestEdge(
-                    [
-                        cfg.dataloader.test.dataset.mapper.image_format.min_size_test,
-                        cfg.dataloader.test.dataset.mapper.image_format.min_size_test,
-                    ],
-                    cfg.dataloader.test.dataset.mapper.image_format.max_size_test,
-                )
-                self.input_format = (
-                    cfg.dataloader.test.dataset.mapper.image_format.format
-                )
+                # Use safe access with default values for config parameters
+                try:
+                    min_size = (
+                        cfg.dataloader.test.dataset.mapper.image_format.min_size_test
+                    )
+                    max_size = (
+                        cfg.dataloader.test.dataset.mapper.image_format.max_size_test
+                    )
+                    image_format = (
+                        cfg.dataloader.test.dataset.mapper.image_format.format
+                    )
+                except (AttributeError, KeyError):
+                    # Default values if config structure is different
+                    min_size = 800
+                    max_size = 1333
+                    image_format = "BGR"
+                    logger.warning(
+                        f"Using default image format settings for {model_name}"
+                    )
+
+                self.aug = T.ResizeShortestEdge([min_size, min_size], max_size)
+                self.input_format = image_format
 
             def __call__(self, image_bgr: np.ndarray):
                 with torch.no_grad():
