@@ -82,12 +82,18 @@ log_import_time("fastapi.middleware.cors")
 from fastapi.middleware.cors import CORSMiddleware
 
 log_import_time("pydantic")
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 fastapi_duration = time.time() - start_fastapi
 print(
     f"[{time.strftime('%H:%M:%S.%f')[:-3]}] fastapi imports took {fastapi_duration:.2f}s"
 )
+
+log_import_time("detectron2.data.transforms")
+from detectron2.data import transforms as T
+
+log_import_time("detectron2.data.detection_utils")
+from detectron2.data.detection_utils import convert_PIL_to_numpy
 
 # Detectron2 imports
 print(f"[{time.strftime('%H:%M:%S.%f')[:-3]}] About to import detectron2...")
@@ -98,9 +104,6 @@ from detectron2.config import get_cfg, LazyConfig, instantiate
 
 log_import_time("detectron2.engine.defaults")
 from detectron2.engine.defaults import DefaultPredictor
-
-log_import_time("detectron2.data.detection_utils")
-from detectron2.data.detection_utils import read_image
 
 log_import_time("detectron2.utils.logger")
 from detectron2.utils.logger import setup_logger
@@ -115,6 +118,13 @@ from omegaconf import ListConfig, DictConfig, OmegaConf
 import torch.serialization
 
 torch.serialization.add_safe_globals([ListConfig, DictConfig, OmegaConf])
+
+try:
+    log_import_time("xformers.ops")
+    import xformers.ops as xops
+except ImportError:
+    logger.warning("xformers not found. Some models may not work.")
+    xops = None
 
 detectron2_duration = time.time() - start_detectron2
 print(
@@ -271,33 +281,39 @@ def load_hadm_model(config_path: str, model_path: str, model_name: str):
 
         # Create predictor-like wrapper
         class HADMPredictor:
-            def __init__(self, model, cfg, model_name):
+            def __init__(self, model, cfg):
                 self.model = model
-                self.cfg = cfg
-                self.model_name = model_name
-                self.input_format = "BGR"  # detectron2 default
+                self.cfg = cfg.clone()
+                self.model.eval()
 
-            def __call__(self, image):
-                # Ensure image is in correct format (BGR numpy array)
-                if len(image.shape) == 3:
-                    height, width = image.shape[:2]
+                # Get the resizing augmentation from the config
+                self.aug = T.ResizeShortestEdge(
+                    [
+                        cfg.dataloader.test.dataset.mapper.image_format.min_size_test,
+                        cfg.dataloader.test.dataset.mapper.image_format.min_size_test,
+                    ],
+                    cfg.dataloader.test.dataset.mapper.image_format.max_size_test,
+                )
+                self.input_format = (
+                    cfg.dataloader.test.dataset.mapper.image_format.format
+                )
 
-                    # Create input dict in detectron2 format
-                    inputs = {
-                        "image": torch.as_tensor(
-                            image.astype("float32").transpose(2, 0, 1)
-                        ).to(device),
-                        "height": height,
-                        "width": width,
-                    }
+            def __call__(self, image_bgr: np.ndarray):
+                with torch.no_grad():
+                    # Apply pre-processing to image.
+                    height, width = image_bgr.shape[:2]
 
-                    with torch.no_grad():
-                        predictions = self.model([inputs])
-                        return predictions[0]
-                else:
-                    raise ValueError(f"Invalid image shape: {image.shape}")
+                    # Apply resizing augmentation
+                    image = self.aug.get_transform(image_bgr).apply_image(image_bgr)
 
-        predictor = HADMPredictor(model, cfg, model_name)
+                    # Convert to tensor
+                    image = torch.as_tensor(image.astype("float32").transpose(2, 0, 1))
+
+                    inputs = {"image": image, "height": height, "width": width}
+                    predictions = self.model([inputs])
+                    return predictions[0]
+
+        predictor = HADMPredictor(model, cfg)
         return predictor
 
     except Exception as e:
