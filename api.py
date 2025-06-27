@@ -119,13 +119,6 @@ import torch.serialization
 
 torch.serialization.add_safe_globals([ListConfig, DictConfig, OmegaConf])
 
-try:
-    log_import_time("xformers.ops")
-    import xformers.ops as xops
-except ImportError:
-    logger.warning("xformers not found. Some models may not work.")
-    xops = None
-
 detectron2_duration = time.time() - start_detectron2
 print(
     f"[{time.strftime('%H:%M:%S.%f')[:-3]}] detectron2 imports took {detectron2_duration:.2f}s"
@@ -136,6 +129,13 @@ print(f"[{time.strftime('%H:%M:%S.%f')[:-3]}] All imports completed!")
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+try:
+    log_import_time("xformers.ops")
+    import xformers.ops as xops
+except ImportError:
+    logger.warning("xformers not found. Some models may not work.")
+    xops = None
 
 print(f"[{time.strftime('%H:%M:%S.%f')[:-3]}] About to create FastAPI app...")
 start_app_creation = time.time()
@@ -283,42 +283,21 @@ def load_hadm_model(config_path: str, model_path: str, model_name: str):
         class HADMPredictor:
             def __init__(self, model, cfg):
                 self.model = model
-                # For OmegaConf, use copy() instead of clone()
-                from copy import deepcopy
-
-                self.cfg = deepcopy(cfg)
+                # OmegaConf doesn't have clone(), use copy() instead
+                self.cfg = OmegaConf.create(cfg)
                 self.model.eval()
 
-                # Get the resizing augmentation from the config
-                # Use safe access with default values for config parameters
-                try:
-                    min_size = (
-                        cfg.dataloader.test.dataset.mapper.image_format.min_size_test
-                    )
-                    max_size = (
-                        cfg.dataloader.test.dataset.mapper.image_format.max_size_test
-                    )
-                    image_format = (
-                        cfg.dataloader.test.dataset.mapper.image_format.format
-                    )
-                except (AttributeError, KeyError):
-                    # Default values if config structure is different
-                    min_size = 800
-                    max_size = 1333
-                    image_format = "BGR"
-                    logger.warning(
-                        f"Using default image format settings for {model_name}"
-                    )
-
-                self.aug = T.ResizeShortestEdge([min_size, min_size], max_size)
-                self.input_format = image_format
+                # Use proper preprocessing for ViTDet models (1024x1024 square)
+                # Based on projects/ViTDet/configs/common/coco_loader_lsj_1024.py
+                self.aug = T.ResizeShortestEdge(short_edge_length=1024, max_size=1024)
+                self.input_format = "BGR"  # detectron2 default
 
             def __call__(self, image_bgr: np.ndarray):
                 with torch.no_grad():
                     # Apply pre-processing to image.
                     height, width = image_bgr.shape[:2]
 
-                    # Apply resizing augmentation
+                    # Apply resizing augmentation to make it 1024x1024
                     image = self.aug.get_transform(image_bgr).apply_image(image_bgr)
 
                     # Convert to tensor
@@ -659,7 +638,7 @@ async def detect_artifacts(
         )
 
     # Validate file type
-    if not file.content_type.startswith("image/"):
+    if not file.content_type or not file.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="File must be an image")
 
     try:
