@@ -7,10 +7,12 @@ Skips all dependency checks and starts the FastAPI server directly.
 import os
 import time
 
+
 def log_time(message):
     """Log message with timestamp"""
     timestamp = time.strftime("%H:%M:%S")
     print(f"[{timestamp}] {message}")
+
 
 def start_server():
     """Start the FastAPI server"""
@@ -39,4 +41,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main() 
+    main()
