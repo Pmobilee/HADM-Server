@@ -62,3 +62,7 @@ regex>=2022.0.0
 sh>=1.14.0
 blobfile>=2.0.0
 triton>=2.0.0
+
+# Redis and Task Queue
+redis>=4.5.0
+rq>=1.15.0

@@ -851,21 +851,24 @@ async def root():
 @app.get("/health")
 async def health_check():
     """Health check endpoint"""
+    # Safely check GPU info only if torch is available
+    gpu_available = "unknown"
+    gpu_memory_gb = 0
+
+    if heavy_imports_loaded and torch is not None:
+        gpu_available = torch.cuda.is_available()
+        if torch.cuda.is_available():
+            gpu_memory_gb = torch.cuda.memory_allocated() / 1024**3
+
     return {
         "status": "healthy",
         "lazy_mode": lazy_mode,
         "heavy_imports_loaded": heavy_imports_loaded,
         "models_loaded": hadm_l_model is not None and hadm_g_model is not None,
         "models_loading": models_loading,
-        "gpu_available": (
-            torch.cuda.is_available() if heavy_imports_loaded else "unknown"
-        ),
+        "gpu_available": gpu_available,
         "device": str(device) if device else "not_set",
-        "gpu_memory_gb": (
-            torch.cuda.memory_allocated() / 1024**3
-            if heavy_imports_loaded and torch.cuda.is_available()
-            else 0
-        ),
+        "gpu_memory_gb": gpu_memory_gb,
     }
 
 
@@ -969,19 +972,28 @@ async def detect_artifacts_batch(
 @app.get("/models/status")
 async def models_status():
     """Get model loading status and information"""
+    # Trigger lazy loading to get accurate status
+    trigger_lazy_load()
+
+    # Safely check GPU memory only if torch is available
+    gpu_memory_gb = 0
+    gpu_memory_total_gb = 0
+
+    if heavy_imports_loaded and torch is not None and torch.cuda.is_available():
+        gpu_memory_gb = torch.cuda.memory_allocated() / 1024**3
+        gpu_memory_total_gb = torch.cuda.get_device_properties(
+            0).total_memory / 1024**3
+
     return {
         "hadm_l_loaded": hadm_l_model is not None,
         "hadm_g_loaded": hadm_g_model is not None,
         "models_loading": models_loading,
         "device": str(device) if device else "not_set",
-        "gpu_memory_gb": (
-            torch.cuda.memory_allocated() / 1024**3 if torch.cuda.is_available() else 0
-        ),
-        "gpu_memory_total_gb": (
-            torch.cuda.get_device_properties(0).total_memory / 1024**3
-            if torch.cuda.is_available()
-            else 0
-        ),
+        "heavy_imports_loaded": heavy_imports_loaded,
+        "torch_available": torch is not None,
+        "cuda_available": (torch.cuda.is_available() if torch is not None else False),
+        "gpu_memory_gb": gpu_memory_gb,
+        "gpu_memory_total_gb": gpu_memory_total_gb,
     }
 
 
