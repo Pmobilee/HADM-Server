@@ -200,10 +200,10 @@ async def control_command(command: str, username: str = Depends(verify_credentia
         job = control_queue.enqueue('inference_worker.handle_control_command', {'command': command})
         
         # Wait for result (with timeout)
-        timeout = 30  # seconds for model loading
+        timeout = 300  # 5 minutes for model loading (models can take ~3 minutes)
         start_time = time.time()
         while job.result is None and (time.time() - start_time) < timeout:
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(0.5)  # Check every 0.5 seconds instead of 0.1
         
         if job.result is None:
             return {"success": False, "message": "Timeout waiting for worker response"}

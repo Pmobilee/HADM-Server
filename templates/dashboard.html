@@ -543,7 +543,7 @@
                 </div>
 
                 <div class="control-buttons">
-                    <button id="restart-worker-btn" class="btn btn-danger">Restart Worker</button>
+                    <button id="unload-all-btn" class="btn btn-danger">Unload All Models</button>
                     <button id="refresh-status-btn" class="btn btn-secondary">Refresh Status</button>
                 </div>
             </div>
@@ -552,8 +552,12 @@
             <div class="card">
                 <div class="card-header">
                     <h2 class="card-title">System Logs</h2>
-                    <button id="clear-logs-btn" class="btn btn-secondary"
-                        style="margin-left: auto; padding: 4px 12px; font-size: 12px;">Clear</button>
+                    <div style="margin-left: auto; display: flex; gap: 8px;">
+                        <button id="auto-refresh-btn" class="btn btn-primary"
+                            style="padding: 4px 12px; font-size: 12px;">Auto-refresh: ON</button>
+                        <button id="clear-logs-btn" class="btn btn-secondary"
+                            style="padding: 4px 12px; font-size: 12px;">Clear</button>
+                    </div>
                 </div>
 
                 <div class="log-tabs">
@@ -638,7 +642,6 @@
     <script>
         // Global variables
         let selectedFile = null;
-        let currentJobId = null;
 
         // Initialize page
         document.addEventListener('DOMContentLoaded', function () {
@@ -666,6 +669,7 @@
             document.getElementById('unload-l-btn').addEventListener('click', () => sendControlCommand('unload_l'));
             document.getElementById('load-g-btn').addEventListener('click', () => sendControlCommand('load_g'));
             document.getElementById('unload-g-btn').addEventListener('click', () => sendControlCommand('unload_g'));
+            document.getElementById('unload-all-btn').addEventListener('click', unloadAllModels);
             document.getElementById('refresh-status-btn').addEventListener('click', refreshDiagnostics);
 
             // Log tabs
@@ -675,6 +679,9 @@
 
             // Clear logs button
             document.getElementById('clear-logs-btn').addEventListener('click', clearCurrentLog);
+
+            // Auto-refresh toggle button
+            document.getElementById('auto-refresh-btn').addEventListener('click', toggleAutoRefresh);
         }
 
         function handleDragOver(e) {
@@ -739,11 +746,11 @@
 
                 const result = await response.json();
 
-                if (result.success && result.job_id) {
-                    currentJobId = result.job_id;
-                    pollForResults();
+                if (result.success) {
+                    showResults(result);
+                    showLoading(false);
                 } else {
-                    showError(result.message || 'Failed to submit job');
+                    showError(result.message || 'Detection failed');
                     showLoading(false);
                 }
             } catch (error) {
@@ -752,35 +759,7 @@
             }
         }
 
-        async function pollForResults() {
-            if (!currentJobId) return;
 
-            try {
-                const response = await fetch(`/api/results/${currentJobId}`, {
-                    headers: {
-                        'Authorization': 'Basic ' + btoa('intelligents:intelligentsintelligents')
-                    }
-                });
-
-                const result = await response.json();
-
-                if (result.status === 'completed') {
-                    showResults(result.result);
-                    showLoading(false);
-                    currentJobId = null;
-                } else if (result.status === 'running') {
-                    setTimeout(pollForResults, 1000); // Poll every second
-                } else {
-                    showError(result.message || 'Job failed');
-                    showLoading(false);
-                    currentJobId = null;
-                }
-            } catch (error) {
-                showError('Error checking results: ' + error.message);
-                showLoading(false);
-                currentJobId = null;
-            }
-        }
 
         function showResults(result) {
             if (!result.success) {
@@ -857,7 +836,52 @@
             }
         }
 
+        async function unloadAllModels() {
+            const button = document.getElementById('unload-all-btn');
+            const originalText = button.textContent;
+            button.disabled = true;
+            button.textContent = 'Unloading...';
+
+            try {
+                // Unload both models sequentially
+                const unloadL = await fetch('/api/control/unload_l', {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': 'Basic ' + btoa('intelligents:intelligentsintelligents')
+                    }
+                });
+
+                const unloadG = await fetch('/api/control/unload_g', {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': 'Basic ' + btoa('intelligents:intelligentsintelligents')
+                    }
+                });
+
+                const resultL = await unloadL.json();
+                const resultG = await unloadG.json();
+
+                if (resultL.success && resultG.success) {
+                    // Refresh diagnostics after successful command
+                    setTimeout(refreshDiagnostics, 1000);
+                } else {
+                    const errors = [];
+                    if (!resultL.success) errors.push(`HADM-L: ${resultL.message}`);
+                    if (!resultG.success) errors.push(`HADM-G: ${resultG.message}`);
+                    showError('Unload errors: ' + errors.join('; '));
+                }
+            } catch (error) {
+                showError('Network error: ' + error.message);
+            } finally {
+                button.disabled = false;
+                button.textContent = originalText;
+            }
+        }
+
         async function refreshDiagnostics() {
+            // Only refresh if auto-refresh is enabled
+            if (!autoRefreshEnabled) return;
+
             try {
                 const response = await fetch('/api/diagnostics', {
                     headers: {
@@ -930,11 +954,37 @@
             }
         }
 
+        let diagnosticsInterval;
+        let logsInterval;
+        let autoRefreshEnabled = true;
+
         function startDiagnosticsPolling() {
             // Poll diagnostics every 2 seconds
-            setInterval(refreshDiagnostics, 2000);
-            // Poll logs every 3 seconds
-            setInterval(refreshLogs, 3000);
+            diagnosticsInterval = setInterval(refreshDiagnostics, 2000);
+            // Poll logs every 5 seconds
+            logsInterval = setInterval(refreshLogs, 5000);
+        }
+
+        function stopDiagnosticsPolling() {
+            if (diagnosticsInterval) clearInterval(diagnosticsInterval);
+            if (logsInterval) clearInterval(logsInterval);
+        }
+
+        function toggleAutoRefresh() {
+            autoRefreshEnabled = !autoRefreshEnabled;
+            const button = document.getElementById('auto-refresh-btn');
+
+            if (autoRefreshEnabled) {
+                button.textContent = 'Auto-refresh: ON';
+                button.classList.remove('btn-secondary');
+                button.classList.add('btn-primary');
+                startDiagnosticsPolling();
+            } else {
+                button.textContent = 'Auto-refresh: OFF';
+                button.classList.remove('btn-primary');
+                button.classList.add('btn-secondary');
+                stopDiagnosticsPolling();
+            }
         }
 
         function showLoading(show) {
@@ -963,7 +1013,13 @@
             document.querySelectorAll('.log-content').forEach(content => {
                 content.classList.remove('active');
             });
-            document.getElementById(`${logType}-log`).classList.add('active');
+            const activeLogContent = document.getElementById(`${logType}-log`);
+            activeLogContent.classList.add('active');
+
+            // Always auto-scroll to bottom when switching tabs (show newest logs)
+            setTimeout(() => {
+                activeLogContent.scrollTop = activeLogContent.scrollHeight;
+            }, 50); // Increased timeout to ensure rendering is complete
         }
 
         function clearCurrentLog() {
@@ -973,6 +1029,9 @@
         }
 
         async function refreshLogs() {
+            // Only refresh if auto-refresh is enabled
+            if (!autoRefreshEnabled) return;
+
             try {
                 const response = await fetch('/api/logs', {
                     headers: {

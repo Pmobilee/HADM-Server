@@ -34,6 +34,7 @@ BASE_DIR = Path(__file__).resolve().parent
 hadm_l_model: Optional[Any] = None
 hadm_g_model: Optional[Any] = None
 device: Optional[Any] = None
+worker_initialized: bool = False
 
 # Heavy imports - loaded when worker starts
 torch = None
@@ -51,6 +52,10 @@ def load_heavy_imports():
     """Load all heavy ML libraries"""
     global torch, LazyConfig, instantiate, setup_logger, DetectionCheckpointer
     global T, ListConfig, DictConfig, OmegaConf
+
+    # Skip if already loaded
+    if torch is not None:
+        return
 
     logger.info("Loading heavy imports (torch, detectron2, etc.)...")
     start_time = time.time()
@@ -95,61 +100,117 @@ def get_device():
     """Get the appropriate device for inference"""
     global device
     if device is None:
+        # Ensure heavy imports are loaded before using torch
+        if torch is None:
+            load_heavy_imports()
+        
         if torch.cuda.is_available():
             device = torch.device("cuda")
-            logger.info(f"Using CUDA device: {torch.cuda.get_device_name()}")
+            # Avoid calling get_device_name() which triggers CUDA initialization
+            logger.info("Using CUDA device")
         else:
             device = torch.device("cpu")
             logger.info("Using CPU device")
     return device
 
 
-def load_hadm_model(model_path: str, model_name: str):
-    """Load a HADM model from a checkpoint file, assuming it's a self-contained model."""
-    logger.info(f"Loading {model_name} model from {model_path}...")
+def load_hadm_model(config_path: str, model_path: str, model_name: str):
+    """Load a HADM model using LazyConfig (same approach as api.py)"""
+    logger.info(f"[LOAD_START] Loading {model_name} model from {model_path}...")
     start_time = time.time()
+
+    # Check if files exist
+    if not Path(config_path).exists():
+        raise FileNotFoundError(f"Config file not found: {config_path}")
 
     if not Path(model_path).exists():
         raise FileNotFoundError(f"Model file not found: {model_path}")
 
     device = get_device()
 
-    # Load the model directly. This assumes the .pth file contains the entire model object.
-    model = torch.load(model_path, map_location=device)
+    # Load LazyConfig
+    cfg = LazyConfig.load(config_path)
+    logger.info(f"Config loaded successfully for {model_name}")
+
+    # Update model checkpoint path
+    if hasattr(cfg, "train") and hasattr(cfg.train, "init_checkpoint"):
+        cfg.train.init_checkpoint = str(
+            Path("pretrained_models/eva02_L_coco_det_sys_o365.pth")
+        )
+        logger.info(f"Updated init_checkpoint for {model_name}")
+
+    # Clean up any device references in model config to avoid conflicts
+    if hasattr(cfg.model, "device"):
+        delattr(cfg.model, "device")
+
+    # Set device for training config
+    if hasattr(cfg, "train"):
+        cfg.train.device = str(device)
+        logger.info(f"Set device to {device} for {model_name}")
+
+    logger.info(f"About to instantiate model for {model_name}...")
+
+    # Instantiate model
+    model = instantiate(cfg.model)
     model.to(device)
     model.eval()
 
-    # Create a custom predictor class that doesn't rely on a config object
+    # Load the HADM checkpoint directly, bypassing fvcore's rigid checkpointer
+    logger.info(f"Loading checkpoint from {model_path} with torch.load...")
+    checkpoint_data = torch.load(
+        model_path, map_location=device, weights_only=False
+    )
+
+    # The actual model weights are in the 'model' key
+    if "model" in checkpoint_data:
+        # Use DetectionCheckpointer just for its weight-mapping logic
+        checkpointer = DetectionCheckpointer(model)
+        # The _load_model method is what handles the state dict loading
+        checkpointer._load_model(checkpoint_data)
+    else:
+        raise ValueError(f"Checkpoint for {model_name} does not contain a 'model' key!")
+
+    logger.info(f"[LOAD_COMPLETE] {model_name} model loaded successfully")
+    # Only log GPU memory if CUDA is available and initialized
+    if torch.cuda.is_available() and torch.cuda.is_initialized():
+        logger.info(
+            f"GPU memory allocated: {torch.cuda.memory_allocated() / 1024**3:.2f} GB"
+        )
+
+    # Create predictor-like wrapper
     class HADMPredictor:
-        def __init__(self, model):
+        def __init__(self, model, cfg):
             self.model = model
-            self.device = device
+            # OmegaConf doesn't have clone(), use copy() instead
+            self.cfg = OmegaConf.create(cfg)
+            self.model.eval()
+
+            # Use proper preprocessing for ViTDet models (1024x1024 square)
+            # Based on projects/ViTDet/configs/common/coco_loader_lsj_1024.py
+            self.aug = T.ResizeShortestEdge(
+                short_edge_length=1024, max_size=1024)
+            self.input_format = "BGR"  # detectron2 default
 
         def __call__(self, image_bgr):
-            # Convert BGR to RGB
-            image_rgb = image_bgr[:, :, ::-1]
-
-            # Apply transforms (these were hardcoded, so no config dependency)
-            height, width = image_rgb.shape[:2]
-            transform = T.ResizeShortestEdge([800], 1333)
-            image_tensor = transform.get_transform(
-                image_rgb).apply_image(image_rgb)
-            image_tensor = torch.as_tensor(
-                image_tensor.astype("float32").transpose(2, 0, 1))
-
-            inputs = {"image": image_tensor.to(
-                self.device), "height": height, "width": width}
-
             with torch.no_grad():
+                # Apply pre-processing to image.
+                height, width = image_bgr.shape[:2]
+
+                # Apply resizing augmentation to make it 1024x1024
+                image = self.aug.get_transform(image_bgr).apply_image(image_bgr)
+
+                # Convert to tensor
+                image = torch.as_tensor(
+                    image.astype("float32").transpose(2, 0, 1))
+
+                inputs = {"image": image, "height": height, "width": width}
                 predictions = self.model([inputs])
+                return predictions[0]
 
-            return predictions[0]
-
-    predictor = HADMPredictor(model)
+    predictor = HADMPredictor(model, cfg)
 
     duration = time.time() - start_time
-    logger.info(
-        f"{model_name} model loaded successfully in {duration:.2f} seconds")
+    logger.info(f"[LOAD_FINAL] {model_name} model loaded successfully in {duration:.2f} seconds")
 
     return predictor
 
@@ -158,23 +219,28 @@ def load_models(force_reload: bool = False):
     """Load both HADM-L and HADM-G models"""
     global hadm_l_model, hadm_g_model
 
+    # Ensure heavy imports are loaded first (like api.py does)
+    load_heavy_imports()
+    
     logger.info("Loading HADM models...")
 
-    # Model paths
+    # Model paths - using correct safetensors format
     base_path = BASE_DIR / "pretrained_models"
-    hadm_l_weights = base_path / "HADM-L" / "model_final.pth"
-    hadm_g_weights = base_path / "HADM-G" / "model_final.pth"
+    hadm_l_weights = base_path / "HADM-L_0249999.pth"
+    hadm_g_weights = base_path / "HADM-G_0249999.pth"
 
     try:
         # Load HADM-L
         if hadm_l_weights.exists():
-            hadm_l_model = load_hadm_model(str(hadm_l_weights), "HADM-L")
+            hadm_l_config = "projects/ViTDet/configs/eva2_o365_to_coco/demo_local.py"
+            hadm_l_model = load_hadm_model(hadm_l_config, str(hadm_l_weights), "HADM-L")
         else:
             logger.warning(f"HADM-L model file not found: {hadm_l_weights}")
 
         # Load HADM-G
         if hadm_g_weights.exists():
-            hadm_g_model = load_hadm_model(str(hadm_g_weights), "HADM-G")
+            hadm_g_config = "projects/ViTDet/configs/eva2_o365_to_coco/demo_global.py"
+            hadm_g_model = load_hadm_model(hadm_g_config, str(hadm_g_weights), "HADM-G")
         else:
             logger.warning(f"HADM-G model file not found: {hadm_g_weights}")
 
@@ -200,17 +266,33 @@ def run_hadm_l_inference(image_array) -> List[Dict]:
         scores = instances.scores.cpu().numpy()
         classes = instances.pred_classes.cpu().numpy()
 
-        # Class names for HADM-L (local artifacts)
-        class_names = ["local_artifact"]
+        # HADM-L class mapping (based on LOCAL_HUMAN_ARTIFACT_CATEGORIES)
+        class_names = {
+            0: "face",
+            1: "torso",
+            2: "arm",
+            3: "leg",
+            4: "hand",
+            5: "feet",
+        }
 
         detections = []
         for i in range(len(boxes)):
             if scores[i] > 0.5:  # Confidence threshold
+                bbox = boxes[i].tolist()
+                confidence = float(scores[i])
+                class_id = int(classes[i])
+                
                 detection = {
-                    "bbox": boxes[i].tolist(),
-                    "confidence": float(scores[i]),
-                    "class_name": class_names[0],
-                    "artifacts": {"type": "local", "confidence": float(scores[i])}
+                    "bbox": bbox,
+                    "confidence": confidence,
+                    "class_name": class_names.get(class_id, f"local_artifact_class_{class_id}"),
+                    "artifacts": {
+                        "class_id": class_id,
+                        "type": "local_artifact",
+                        "detection_method": "HADM-L",
+                        "bbox_area": (bbox[2] - bbox[0]) * (bbox[3] - bbox[1]),
+                    }
                 }
                 detections.append(detection)
 
@@ -242,17 +324,39 @@ def run_hadm_g_inference(image_array) -> List[Dict]:
         scores = instances.scores.cpu().numpy()
         classes = instances.pred_classes.cpu().numpy()
 
-        # Class names for HADM-G (global artifacts)
-        class_names = ["global_artifact"]
+        # HADM-G class mapping (based on GLOBAL_HUMAN_ARTIFACT_CATEGORIES)
+        class_names = {
+            0: "human missing arm",
+            1: "human missing face",
+            2: "human missing feet",
+            3: "human missing hand",
+            4: "human missing leg",
+            5: "human missing torso",
+            6: "human with extra arm",
+            7: "human with extra face",
+            8: "human with extra feet",
+            9: "human with extra hand",
+            10: "human with extra leg",
+            11: "human with extra torso",
+        }
 
         detections = []
         for i in range(len(boxes)):
             if scores[i] > 0.5:  # Confidence threshold
+                bbox = boxes[i].tolist()
+                confidence = float(scores[i])
+                class_id = int(classes[i])
+                
                 detection = {
-                    "bbox": boxes[i].tolist(),
-                    "confidence": float(scores[i]),
-                    "class_name": class_names[0],
-                    "artifacts": {"type": "global", "confidence": float(scores[i])}
+                    "bbox": bbox,
+                    "confidence": confidence,
+                    "class_name": class_names.get(class_id, f"global_artifact_class_{class_id}"),
+                    "artifacts": {
+                        "class_id": class_id,
+                        "type": "global_artifact",
+                        "detection_method": "HADM-G",
+                        "bbox_area": (bbox[2] - bbox[0]) * (bbox[3] - bbox[1]),
+                    }
                 }
                 detections.append(detection)
 
@@ -269,6 +373,9 @@ def run_hadm_g_inference(image_array) -> List[Dict]:
 
 def execute_inference(job_data):
     """Execute inference job"""
+    # Ensure worker is initialized in this process (lazy init after fork)
+    ensure_worker_initialized()
+    
     try:
         # Decode image data
         image_data = base64.b64decode(job_data['image_data'])
@@ -330,6 +437,9 @@ def handle_control_command(command_data):
     """Handle control commands"""
     global hadm_l_model, hadm_g_model
 
+    # Ensure worker is initialized in this process (lazy init after fork)
+    ensure_worker_initialized()
+
     try:
         command = command_data.get('command')
         # Suppress noisy status logs
@@ -338,11 +448,15 @@ def handle_control_command(command_data):
 
         if command == 'load_l':
             if hadm_l_model is None:
+                logger.info("[CONTROL] Loading HADM-L model on explicit request...")
                 base_path = BASE_DIR / "pretrained_models"
-                hadm_l_weights = base_path / "HADM-L" / "model_final.pth"
-                hadm_l_model = load_hadm_model(str(hadm_l_weights), "HADM-L")
+                hadm_l_weights = base_path / "HADM-L_0249999.pth"
+                hadm_l_config = "projects/ViTDet/configs/eva2_o365_to_coco/demo_local.py"
+                hadm_l_model = load_hadm_model(hadm_l_config, str(hadm_l_weights), "HADM-L")
+                logger.info("[CONTROL] HADM-L model loading command completed")
                 return {"success": True, "message": "HADM-L model loaded successfully"}
             else:
+                logger.info("[CONTROL] HADM-L model already loaded, skipping")
                 return {"success": True, "message": "HADM-L model already loaded"}
 
         elif command == 'unload_l':
@@ -357,11 +471,15 @@ def handle_control_command(command_data):
 
         elif command == 'load_g':
             if hadm_g_model is None:
+                logger.info("[CONTROL] Loading HADM-G model on explicit request...")
                 base_path = BASE_DIR / "pretrained_models"
-                hadm_g_weights = base_path / "HADM-G" / "model_final.pth"
-                hadm_g_model = load_hadm_model(str(hadm_g_weights), "HADM-G")
+                hadm_g_weights = base_path / "HADM-G_0249999.pth"
+                hadm_g_config = "projects/ViTDet/configs/eva2_o365_to_coco/demo_global.py"
+                hadm_g_model = load_hadm_model(hadm_g_config, str(hadm_g_weights), "HADM-G")
+                logger.info("[CONTROL] HADM-G model loading command completed")
                 return {"success": True, "message": "HADM-G model loaded successfully"}
             else:
+                logger.info("[CONTROL] HADM-G model already loaded, skipping")
                 return {"success": True, "message": "HADM-G model already loaded"}
 
         elif command == 'unload_g':
@@ -402,6 +520,23 @@ def handle_control_command(command_data):
         logger.error(traceback.format_exc())
         return {"success": False, "message": f"Command failed: {str(e)}"}
 
+def ensure_worker_initialized():
+    """Ensure worker is initialized in the worker process (lazy initialization)"""
+    global worker_initialized
+    
+    if not worker_initialized:
+        logger.info("First job in worker process, initializing worker environment...")
+        
+        # Initialize device (but don't load models automatically)
+        get_device()
+        
+        # Don't auto-load models here - let explicit commands handle model loading
+        # This prevents race conditions and duplicate loading attempts
+        logger.info("Worker initialized. Models will be loaded on explicit commands.")
+        
+        worker_initialized = True
+
+
 # Initialize worker globally
 
 
@@ -409,25 +544,30 @@ def initialize_worker(load_on_startup: bool = True):
     """Initialize worker with heavy imports and models"""
     logger.info("Initializing HADM Inference Worker...")
 
-    # Load heavy imports
+    # Load heavy imports (but don't initialize CUDA yet)
     load_heavy_imports()
 
-    # Initialize device
-    get_device()
-
-    # Load models on startup unless disabled
+    # Don't initialize device or load models in the parent process
+    # This will be done in the worker process after forking
     if load_on_startup:
-        try:
-            load_models()
-        except Exception as e:
-            logger.error(f"Failed to load models on startup: {str(e)}")
-            logger.info("Worker will continue without models loaded")
+        logger.info("Models will be loaded after worker fork to avoid CUDA multiprocessing issues")
     else:
         logger.info("Skipping model loading on startup as requested.")
 
 
 def main():
     """Main worker function"""
+    import multiprocessing
+    
+    # Set multiprocessing start method to 'spawn' for CUDA compatibility
+    # This must be done before any CUDA operations
+    try:
+        multiprocessing.set_start_method('spawn', force=True)
+        logger.info("Set multiprocessing start method to 'spawn' for CUDA compatibility")
+    except RuntimeError as e:
+        # If already set, that's fine
+        logger.info(f"Multiprocessing start method already set: {e}")
+    
     logger.info("Starting HADM Inference Worker...")
 
     # Check for --unload argument

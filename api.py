@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """
-HADM FastAPI Server
-Provides REST API endpoints for Human Artifact Detection using HADM-L and HADM-G models
+HADM Unified FastAPI Server
+Provides REST API endpoints and web dashboard for Human Artifact Detection using HADM-L and HADM-G models
+Includes lazy loading to avoid CUDA multiprocessing issues
 """
 
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks, Request
+from fastapi.responses import JSONResponse, HTMLResponse, RedirectResponse
+from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks, Request, Depends, Form, status
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
 import uvicorn
 import contextlib
 import base64
@@ -24,6 +26,8 @@ import time
 import sys
 import argparse
 from typing import Optional, Dict, Any, List, Union
+from datetime import datetime
+import json
 
 # Check for lazy mode before any heavy imports
 lazy_mode = "--lazy" in sys.argv
@@ -35,29 +39,9 @@ def log_import_time(name):
     print(f"[{timestamp}] Importing {name}...")
 
 
-print(f"[{time.strftime('%H:%M:%S.%f')[:-3]}] Starting api.py imports...")
+print(f"[{time.strftime('%H:%M:%S.%f')[:-3]}] Starting unified api.py...")
 if lazy_mode:
-    print(
-        f"[{time.strftime('%H:%M:%S.%f')[:-3]}] LAZY MODE: Heavy imports will be deferred until first request"
-    )
-
-log_import_time("os")
-
-log_import_time("io")
-
-log_import_time("asyncio")
-
-log_import_time("logging")
-
-log_import_time("pathlib.Path")
-
-log_import_time("queue.Queue")
-
-log_import_time("threading")
-
-log_import_time("base64")
-
-log_import_time("contextlib")
+    print(f"[{time.strftime('%H:%M:%S.%f')[:-3]}] LAZY MODE: Heavy imports will be deferred until model loading")
 
 # Type hints for lazy imports
 torch: Optional[Any] = None
@@ -81,11 +65,8 @@ if not lazy_mode:
     start_torch = time.time()
     log_import_time("torch")
     import torch
-
     torch_duration = time.time() - start_torch
-    print(
-        f"[{time.strftime('%H:%M:%S.%f')[:-3]}] torch import took {torch_duration:.2f}s"
-    )
+    print(f"[{time.strftime('%H:%M:%S.%f')[:-3]}] torch import took {torch_duration:.2f}s")
 
     log_import_time("numpy")
     import numpy as np
@@ -120,13 +101,10 @@ if not lazy_mode:
 
     # Register OmegaConf classes as safe globals for torch.load
     import torch.serialization
-
     torch.serialization.add_safe_globals([ListConfig, DictConfig, OmegaConf])
 
     detectron2_duration = time.time() - start_detectron2
-    print(
-        f"[{time.strftime('%H:%M:%S.%f')[:-3]}] detectron2 imports took {detectron2_duration:.2f}s"
-    )
+    print(f"[{time.strftime('%H:%M:%S.%f')[:-3]}] detectron2 imports took {detectron2_duration:.2f}s")
 
     try:
         log_import_time("xformers.ops")
@@ -138,30 +116,19 @@ if not lazy_mode:
 print(f"[{time.strftime('%H:%M:%S.%f')[:-3]}] About to import uvicorn...")
 start_uvicorn = time.time()
 log_import_time("uvicorn")
-
 uvicorn_duration = time.time() - start_uvicorn
-print(
-    f"[{time.strftime('%H:%M:%S.%f')[:-3]}] uvicorn import took {uvicorn_duration:.2f}s"
-)
+print(f"[{time.strftime('%H:%M:%S.%f')[:-3]}] uvicorn import took {uvicorn_duration:.2f}s")
 
 print(f"[{time.strftime('%H:%M:%S.%f')[:-3]}] About to import fastapi...")
 start_fastapi = time.time()
 log_import_time("fastapi")
-
 log_import_time("fastapi.responses")
-
 log_import_time("fastapi.middleware.cors")
-
 log_import_time("pydantic")
-
 log_import_time("fastapi.templating")
-
 log_import_time("fastapi.staticfiles")
-
 fastapi_duration = time.time() - start_fastapi
-print(
-    f"[{time.strftime('%H:%M:%S.%f')[:-3]}] fastapi imports took {fastapi_duration:.2f}s"
-)
+print(f"[{time.strftime('%H:%M:%S.%f')[:-3]}] fastapi imports took {fastapi_duration:.2f}s")
 
 print(f"[{time.strftime('%H:%M:%S.%f')[:-3]}] All imports completed!")
 
@@ -176,17 +143,19 @@ start_app_creation = time.time()
 hadm_l_model: Optional[Any] = None
 hadm_g_model: Optional[Any] = None
 device: Optional[Any] = None
-request_queue = Queue()
-is_processing = False
 models_loading = False
 heavy_imports_loaded = not lazy_mode
+model_load_lock = threading.Lock()
 
+# Authentication
+security = HTTPBasic()
+ADMIN_USERNAME = "intelligents"
+ADMIN_PASSWORD = "intelligentsintelligents"
 
 def ensure_heavy_imports():
     """Ensure heavy imports are loaded - decorator-friendly version"""
     if lazy_mode and not heavy_imports_loaded:
         load_heavy_imports()
-
 
 def load_heavy_imports():
     """Load heavy imports when in lazy mode"""
@@ -240,13 +209,10 @@ def load_heavy_imports():
 
         # Register OmegaConf classes as safe globals for torch.load
         import torch.serialization
-
-        torch.serialization.add_safe_globals(
-            [ListConfig, DictConfig, OmegaConf])
+        torch.serialization.add_safe_globals([ListConfig, DictConfig, OmegaConf])
 
         try:
             import xformers.ops as xformers_ops
-
             xops = xformers_ops
         except ImportError:
             logger.warning("xformers not found. Some models may not work.")
@@ -260,16 +226,15 @@ def load_heavy_imports():
         logger.error(f"Failed to load heavy imports: {e}")
         raise RuntimeError(f"Critical imports failed: {e}")
 
-
-def trigger_lazy_load():
-    """If in lazy mode and models are not loaded, load them. This is blocking."""
-    with threading.Lock():
-        if lazy_mode and (hadm_l_model is None or hadm_g_model is None):
-            logger.info(
-                "Lazy loading triggered by first request. This will take a moment..."
-            )
-            load_models()
-
+def verify_credentials(credentials: HTTPBasicCredentials = Depends(security)):
+    """Verify HTTP Basic Auth credentials"""
+    if credentials.username != ADMIN_USERNAME or credentials.password != ADMIN_PASSWORD:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid credentials",
+            headers={"WWW-Authenticate": "Basic"},
+        )
+    return credentials.username
 
 # Utility context manager for timing steps with logging
 @contextlib.contextmanager
@@ -282,14 +247,12 @@ def log_time(step: str):
         duration = time.time() - start
         logger.info(f"[TIMING] {step} - completed in {duration:.2f}s")
 
-
 # Response models
 class DetectionResult(BaseModel):
     bbox: List[float]  # [x1, y1, x2, y2]
     confidence: float
     class_name: str
     artifacts: Dict[str, Any]
-
 
 class InferenceResponse(BaseModel):
     success: bool
@@ -299,21 +262,18 @@ class InferenceResponse(BaseModel):
     global_detections: Optional[List[DetectionResult]] = None
     processing_time: Optional[float] = None
 
-
 # FastAPI app
 app = FastAPI(
-    title="HADM FastAPI Server",
-    description="Human Artifact Detection Models API for detecting artifacts in AI-generated images",
-    version="1.0.0",
+    title="HADM Unified Server",
+    description="Human Artifact Detection Models API with Web Dashboard",
+    version="2.0.0",
     docs_url="/docs",
     redoc_url="/redoc",
 )
 app.state.lazy_mode = lazy_mode
 
 app_creation_duration = time.time() - start_app_creation
-print(
-    f"[{time.strftime('%H:%M:%S.%f')[:-3]}] FastAPI app creation took {app_creation_duration:.2f}s"
-)
+print(f"[{time.strftime('%H:%M:%S.%f')[:-3]}] FastAPI app creation took {app_creation_duration:.2f}s")
 
 print(f"[{time.strftime('%H:%M:%S.%f')[:-3]}] Adding CORS middleware...")
 start_cors = time.time()
@@ -328,9 +288,7 @@ app.add_middleware(
 )
 
 cors_duration = time.time() - start_cors
-print(
-    f"[{time.strftime('%H:%M:%S.%f')[:-3]}] CORS middleware took {cors_duration:.2f}s"
-)
+print(f"[{time.strftime('%H:%M:%S.%f')[:-3]}] CORS middleware took {cors_duration:.2f}s")
 
 # Setup templates and static files
 print(f"[{time.strftime('%H:%M:%S.%f')[:-3]}] Setting up templates and static files...")
@@ -344,7 +302,6 @@ os.makedirs("templates", exist_ok=True)
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 print(f"[{time.strftime('%H:%M:%S.%f')[:-3]}] Defining functions...")
-
 
 def load_hadm_model(config_path: str, model_path: str, model_name: str):
     """Load a HADM model using LazyConfig"""
@@ -394,8 +351,7 @@ def load_hadm_model(config_path: str, model_path: str, model_name: str):
 
         # Load the HADM checkpoint directly, bypassing fvcore's rigid checkpointer
         with log_time(f"{model_name} -> Load checkpoint"):
-            logger.info(
-                f"Loading checkpoint from {model_path} with torch.load...")
+            logger.info(f"Loading checkpoint from {model_path} with torch.load...")
             checkpoint_data = torch.load(
                 model_path, map_location=device, weights_only=False
             )
@@ -407,15 +363,12 @@ def load_hadm_model(config_path: str, model_path: str, model_name: str):
                 # The _load_model method is what handles the state dict loading
                 checkpointer._load_model(checkpoint_data)
             else:
-                logger.error(
-                    f"Checkpoint for {model_name} does not contain a 'model' key!"
-                )
+                logger.error(f"Checkpoint for {model_name} does not contain a 'model' key!")
                 return None
 
         logger.info(f"{model_name} model loaded successfully")
-        logger.info(
-            f"GPU memory allocated: {torch.cuda.memory_allocated() / 1024**3:.2f} GB"
-        )
+        if torch.cuda.is_available():
+            logger.info(f"GPU memory allocated: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
 
         # Create predictor-like wrapper
         class HADMPredictor:
@@ -437,8 +390,7 @@ def load_hadm_model(config_path: str, model_path: str, model_name: str):
                     height, width = image_bgr.shape[:2]
 
                     # Apply resizing augmentation to make it 1024x1024
-                    image = self.aug.get_transform(
-                        image_bgr).apply_image(image_bgr)
+                    image = self.aug.get_transform(image_bgr).apply_image(image_bgr)
 
                     # Convert to tensor
                     image = torch.as_tensor(
@@ -454,86 +406,107 @@ def load_hadm_model(config_path: str, model_path: str, model_name: str):
     except Exception as e:
         logger.error(f"Failed to load {model_name} model: {e}")
         import traceback
-
         logger.error(f"Traceback: {traceback.format_exc()}")
         return None
 
-
-def load_models():
-    """Load HADM-L and HADM-G models into VRAM, skipping already loaded ones."""
+def load_model_by_type(model_type: str):
+    """Load a specific model type (hadm_l or hadm_g)"""
     global hadm_l_model, hadm_g_model, device, models_loading
 
-    if models_loading:
-        logger.info("Models are already being loaded...")
-        return False
+    with model_load_lock:
+        if models_loading:
+            return {"success": False, "message": "Models are already being loaded"}
 
-    models_loading = True
-    success = True
+        models_loading = True
+        try:
+            ensure_heavy_imports()
+            logger.info(f"Loading {model_type.upper()} model...")
+            setup_logger()
+
+            if not device:
+                if torch.cuda.is_available():
+                    device = torch.device("cuda")
+                    logger.info(f"Using GPU: {torch.cuda.get_device_name(0)}")
+                else:
+                    device = torch.device("cpu")
+                    logger.warning("CUDA not available, using CPU")
+
+            model_dir = Path("pretrained_models")
+            
+            if model_type == "hadm_l":
+                if hadm_l_model is not None:
+                    return {"success": True, "message": "HADM-L model is already loaded"}
+                
+                hadm_l_path = model_dir / "HADM-L_0249999.pth"
+                if hadm_l_path.exists():
+                    hadm_l_config = "projects/ViTDet/configs/eva2_o365_to_coco/demo_local.py"
+                    with log_time("Total HADM-L load time"):
+                        hadm_l_model = load_hadm_model(hadm_l_config, str(hadm_l_path), "HADM-L")
+                    if hadm_l_model is None:
+                        return {"success": False, "message": "HADM-L model failed to load"}
+                    return {"success": True, "message": "HADM-L model loaded successfully"}
+                else:
+                    return {"success": False, "message": f"HADM-L model not found at {hadm_l_path}"}
+            
+            elif model_type == "hadm_g":
+                if hadm_g_model is not None:
+                    return {"success": True, "message": "HADM-G model is already loaded"}
+                
+                hadm_g_path = model_dir / "HADM-G_0249999.pth"
+                if hadm_g_path.exists():
+                    hadm_g_config = "projects/ViTDet/configs/eva2_o365_to_coco/demo_global.py"
+                    with log_time("Total HADM-G load time"):
+                        hadm_g_model = load_hadm_model(hadm_g_config, str(hadm_g_path), "HADM-G")
+                    if hadm_g_model is None:
+                        return {"success": False, "message": "HADM-G model failed to load"}
+                    return {"success": True, "message": "HADM-G model loaded successfully"}
+                else:
+                    return {"success": False, "message": f"HADM-G model not found at {hadm_g_path}"}
+            
+            else:
+                return {"success": False, "message": f"Unknown model type: {model_type}"}
+
+        except Exception as e:
+            logger.error(f"Failed to load {model_type} model: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            return {"success": False, "message": f"Failed to load {model_type} model: {str(e)}"}
+        finally:
+            models_loading = False
+
+def unload_model_by_type(model_type: str):
+    """Unload a specific model type"""
+    global hadm_l_model, hadm_g_model
+
     try:
-        ensure_heavy_imports()
-        logger.info("Checking and loading HADM models into VRAM...")
-        setup_logger()
-
-        if not device:
-            if torch.cuda.is_available():
-                device = torch.device("cuda")
-                logger.info(f"Using GPU: {torch.cuda.get_device_name(0)}")
+        if model_type == "hadm_l":
+            if hadm_l_model is not None:
+                del hadm_l_model
+                hadm_l_model = None
+                if torch is not None and torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                logger.info("HADM-L model unloaded")
+                return {"success": True, "message": "HADM-L model unloaded successfully"}
             else:
-                device = torch.device("cpu")
-                logger.warning("CUDA not available, using CPU")
-
-        model_dir = Path("pretrained_models")
-        hadm_l_path = model_dir / "HADM-L_0249999.pth"
-        hadm_g_path = model_dir / "HADM-G_0249999.pth"
-
-        # Load HADM-L if not already loaded
-        if hadm_l_model is None:
-            if hadm_l_path.exists():
-                hadm_l_config = "projects/ViTDet/configs/eva2_o365_to_coco/demo_local.py"
-                with log_time("Total HADM-L load time"):
-                    hadm_l_model = load_hadm_model(
-                        hadm_l_config, str(hadm_l_path), "HADM-L")
-                if hadm_l_model is None:
-                    logger.error("HADM-L model failed to load.")
-                    success = False
+                return {"success": True, "message": "HADM-L model was not loaded"}
+        
+        elif model_type == "hadm_g":
+            if hadm_g_model is not None:
+                del hadm_g_model
+                hadm_g_model = None
+                if torch is not None and torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                logger.info("HADM-G model unloaded")
+                return {"success": True, "message": "HADM-G model unloaded successfully"}
             else:
-                logger.error(f"HADM-L model not found at {hadm_l_path}")
-                success = False
+                return {"success": True, "message": "HADM-G model was not loaded"}
+        
         else:
-            logger.info("HADM-L model is already loaded.")
-
-        # Load HADM-G if not already loaded
-        if hadm_g_model is None:
-            if hadm_g_path.exists():
-                hadm_g_config = "projects/ViTDet/configs/eva2_o365_to_coco/demo_global.py"
-                with log_time("Total HADM-G load time"):
-                    hadm_g_model = load_hadm_model(
-                        hadm_g_config, str(hadm_g_path), "HADM-G")
-                if hadm_g_model is None:
-                    logger.error("HADM-G model failed to load.")
-                    success = False
-            else:
-                logger.error(f"HADM-G model not found at {hadm_g_path}")
-                success = False
-        else:
-            logger.info("HADM-G model is already loaded.")
-
-        if success:
-            logger.info(
-                "All required models are loaded successfully into VRAM.")
-        else:
-            logger.warning("One or more models failed to load.")
-
-        return success
+            return {"success": False, "message": f"Unknown model type: {model_type}"}
 
     except Exception as e:
-        logger.error(f"Failed to load models: {e}")
-        import traceback
-        logger.error(f"Traceback: {traceback.format_exc()}")
-        return False
-    finally:
-        models_loading = False
-
+        logger.error(f"Failed to unload {model_type} model: {e}")
+        return {"success": False, "message": f"Failed to unload {model_type} model: {str(e)}"}
 
 def preprocess_image(image):
     """Preprocess image for detectron2 inference"""
@@ -549,7 +522,6 @@ def preprocess_image(image):
     image_bgr = image_array[:, :, ::-1]  # RGB to BGR
 
     return image_bgr
-
 
 def run_hadm_l_inference(image_array) -> List[DetectionResult]:
     """Run HADM-L (Local) inference on image"""
@@ -607,7 +579,6 @@ def run_hadm_l_inference(image_array) -> List[DetectionResult]:
     except Exception as e:
         logger.error(f"HADM-L inference failed: {e}")
         return []
-
 
 def run_hadm_g_inference(image_array) -> List[DetectionResult]:
     """Run HADM-G (Global) inference on image"""
@@ -672,7 +643,6 @@ def run_hadm_g_inference(image_array) -> List[DetectionResult]:
         logger.error(f"HADM-G inference failed: {e}")
         return []
 
-
 def draw_bounding_boxes(
     image,
     local_detections: List[DetectionResult],
@@ -717,8 +687,7 @@ def draw_bounding_boxes(
         # Draw label background
         if font:
             label_bbox = draw.textbbox((x1, y1 - 30), label, font=font)
-            conf_bbox = draw.textbbox(
-                (x1, y1 - 15), confidence_text, font=small_font)
+            conf_bbox = draw.textbbox((x1, y1 - 15), confidence_text, font=small_font)
         else:
             label_bbox = draw.textbbox((x1, y1 - 30), label)
             conf_bbox = draw.textbbox((x1, y1 - 15), confidence_text)
@@ -736,8 +705,7 @@ def draw_bounding_boxes(
         # Draw label text
         if font:
             draw.text((x1, y1 - 30), label, fill="white", font=font)
-            draw.text((x1, y1 - 15), confidence_text,
-                      fill="white", font=small_font)
+            draw.text((x1, y1 - 15), confidence_text, fill="white", font=small_font)
         else:
             draw.text((x1, y1 - 30), label, fill="white")
             draw.text((x1, y1 - 15), confidence_text, fill="white")
@@ -757,8 +725,7 @@ def draw_bounding_boxes(
         # Draw label background
         if font:
             label_bbox = draw.textbbox((x1, y1 - 30), label, font=font)
-            conf_bbox = draw.textbbox(
-                (x1, y1 - 15), confidence_text, font=small_font)
+            conf_bbox = draw.textbbox((x1, y1 - 15), confidence_text, font=small_font)
         else:
             label_bbox = draw.textbbox((x1, y1 - 30), label)
             conf_bbox = draw.textbbox((x1, y1 - 15), confidence_text)
@@ -776,14 +743,12 @@ def draw_bounding_boxes(
         # Draw label text
         if font:
             draw.text((x1, y1 - 30), label, fill="white", font=font)
-            draw.text((x1, y1 - 15), confidence_text,
-                      fill="white", font=small_font)
+            draw.text((x1, y1 - 15), confidence_text, fill="white", font=small_font)
         else:
             draw.text((x1, y1 - 30), label, fill="white")
             draw.text((x1, y1 - 15), confidence_text, fill="white")
 
     return img_with_boxes
-
 
 def process_inference_request(image, mode: str) -> InferenceResponse:
     """Process a single inference request"""
@@ -811,9 +776,7 @@ def process_inference_request(image, mode: str) -> InferenceResponse:
 
         processing_time = time.time() - start_time
 
-        logger.info(
-            f"[TIMING] Inference request ({mode}) - completed in {processing_time:.2f}s"
-        )
+        logger.info(f"[TIMING] Inference request ({mode}) - completed in {processing_time:.2f}s")
 
         return InferenceResponse(
             success=True,
@@ -833,20 +796,47 @@ def process_inference_request(image, mode: str) -> InferenceResponse:
         logger.error(f"Inference failed: {e}")
         return InferenceResponse(success=False, message=f"Inference failed: {str(e)}")
 
-
 # API Endpoints
 
-
 @app.get("/")
-async def root():
-    """Root endpoint with basic info"""
-    return {
-        "message": "HADM FastAPI Server",
-        "version": "1.0.0",
-        "status": "running",
-        "models_loaded": hadm_l_model is not None and hadm_g_model is not None,
-    }
+async def root(request: Request):
+    """Redirect to interface if authenticated, otherwise to login"""
+    auth_cookie = request.cookies.get("authenticated")
+    if auth_cookie == "true":
+        return RedirectResponse(url="/interface")
+    return RedirectResponse(url="/login")
 
+@app.get("/login", response_class=HTMLResponse)
+async def login_page(request: Request):
+    """Serve login page or redirect to interface if already authenticated"""
+    auth_cookie = request.cookies.get("authenticated")
+    if auth_cookie == "true":
+        return RedirectResponse(url="/interface")
+    return templates.TemplateResponse("login.html", {"request": request})
+
+@app.post("/login")
+async def login(request: Request, username: str = Form(...), password: str = Form(...)):
+    """Handle login form submission"""
+    if username == ADMIN_USERNAME and password == ADMIN_PASSWORD:
+        response = RedirectResponse(url="/interface", status_code=status.HTTP_302_FOUND)
+        # In a real app, you'd set a secure session cookie here
+        response.set_cookie(key="authenticated", value="true", httponly=True)
+        return response
+    else:
+        return templates.TemplateResponse(
+            "login.html", 
+            {"request": request, "error": "Invalid credentials"}
+        )
+
+@app.get("/dashboard", response_class=HTMLResponse)
+async def dashboard(request: Request):
+    """Serve dashboard page"""
+    # Simple cookie-based auth check
+    auth_cookie = request.cookies.get("authenticated")
+    if auth_cookie != "true":
+        return RedirectResponse(url="/login")
+    
+    return templates.TemplateResponse("dashboard.html", {"request": request})
 
 @app.get("/health")
 async def health_check():
@@ -871,10 +861,93 @@ async def health_check():
         "gpu_memory_gb": gpu_memory_gb,
     }
 
+@app.get("/api/diagnostics")
+async def get_diagnostics(username: str = Depends(verify_credentials)):
+    """Get system diagnostics"""
+    try:
+        # Get current status
+        gpu_memory_gb = 0
+        gpu_memory_total_gb = 0
+        device_name = "Unknown"
 
-@app.post("/detect", response_model=InferenceResponse)
+        if heavy_imports_loaded and torch is not None:
+            if torch.cuda.is_available():
+                device_name = torch.cuda.get_device_name(0)
+                
+                # Use nvidia-smi for accurate VRAM measurement
+                try:
+                    import subprocess
+                    result = subprocess.run([
+                        'nvidia-smi', '--query-gpu=memory.used,memory.total', 
+                        '--format=csv,noheader,nounits'
+                    ], capture_output=True, text=True, timeout=5)
+                    
+                    if result.returncode == 0:
+                        lines = result.stdout.strip().split('\n')
+                        if lines and lines[0]:
+                            # Take the first GPU (index 0)
+                            used_mb, total_mb = lines[0].split(', ')
+                            gpu_memory_gb = float(used_mb) / 1024  # Convert MB to GB
+                            gpu_memory_total_gb = float(total_mb) / 1024
+                    else:
+                        # Fallback to torch method
+                        gpu_memory_gb = torch.cuda.memory_allocated() / 1024**3
+                        gpu_memory_total_gb = torch.cuda.get_device_properties(0).total_memory / 1024**3
+                        
+                except (subprocess.TimeoutExpired, subprocess.CalledProcessError, FileNotFoundError) as e:
+                    logger.warning(f"nvidia-smi not available, using torch fallback: {e}")
+                    # Fallback to torch method
+                    gpu_memory_gb = torch.cuda.memory_allocated() / 1024**3
+                    gpu_memory_total_gb = torch.cuda.get_device_properties(0).total_memory / 1024**3
+
+        return {
+            "success": True,
+            "worker_status": "RUNNING",
+            "hadm_l_loaded": hadm_l_model is not None,
+            "hadm_g_loaded": hadm_g_model is not None,
+            "device": device_name,
+            "vram_info": {
+                "allocated_memory": gpu_memory_gb,
+                "total_memory": gpu_memory_total_gb
+            }
+        }
+    
+    except Exception as e:
+        logger.error(f"Error getting diagnostics: {str(e)}")
+        return {
+            "success": False,
+            "message": f"Error: {str(e)}",
+            "worker_status": "ERROR"
+        }
+
+@app.post("/api/control/{command}")
+async def control_command(command: str, username: str = Depends(verify_credentials)):
+    """Send control command to load/unload models"""
+    try:
+        valid_commands = ['load_l', 'unload_l', 'load_g', 'unload_g']
+        if command not in valid_commands:
+            raise HTTPException(status_code=400, detail=f"Invalid command. Valid commands: {valid_commands}")
+        
+        if command == 'load_l':
+            result = load_model_by_type('hadm_l')
+        elif command == 'unload_l':
+            result = unload_model_by_type('hadm_l')
+        elif command == 'load_g':
+            result = load_model_by_type('hadm_g')
+        elif command == 'unload_g':
+            result = unload_model_by_type('hadm_g')
+        
+        return result
+    
+    except Exception as e:
+        logger.error(f"Error handling control command: {str(e)}")
+        return {"success": False, "message": f"Command failed: {str(e)}"}
+
+@app.post("/api/detect", response_model=InferenceResponse)
 async def detect_artifacts(
-    file: UploadFile = File(...), mode: str = "both"  # local, global, or both
+    file: UploadFile = File(...), 
+    mode: str = "both",
+    username: str = Depends(verify_credentials)
 ):
     """
     Detect artifacts in uploaded image
@@ -886,8 +959,6 @@ async def detect_artifacts(
     Returns:
         Detection results with bounding boxes and artifact information
     """
-    trigger_lazy_load()
-
     # Check if models are still loading
     if models_loading:
         raise HTTPException(
@@ -899,13 +970,13 @@ async def detect_artifacts(
     if mode in ["local", "both"] and hadm_l_model is None:
         raise HTTPException(
             status_code=503,
-            detail="HADM-L model not loaded. Please check model status.",
+            detail="HADM-L model not loaded. Please load the model first.",
         )
 
     if mode in ["global", "both"] and hadm_g_model is None:
         raise HTTPException(
             status_code=503,
-            detail="HADM-G model not loaded. Please check model status.",
+            detail="HADM-G model not loaded. Please load the model first.",
         )
 
     # Validate mode
@@ -933,56 +1004,40 @@ async def detect_artifacts(
 
     except Exception as e:
         logger.error(f"Detection endpoint failed: {e}")
-        raise HTTPException(
-            status_code=500, detail=f"Detection failed: {str(e)}")
-
-
-@app.post("/detect/batch")
-async def detect_artifacts_batch(
-    files: List[UploadFile] = File(...), mode: str = "both"
-):
-    """
-    Batch detection for multiple images
-    """
-    if len(files) > 10:  # Limit batch size
-        raise HTTPException(
-            status_code=400, detail="Maximum 10 images per batch")
-
-    results = []
-    for file in files:
-        try:
-            image_data = await file.read()
-            image = Image.open(io.BytesIO(image_data))
-            result = process_inference_request(image, mode)
-            results.append({"filename": file.filename, "result": result})
-        except Exception as e:
-            results.append(
-                {
-                    "filename": file.filename,
-                    "result": InferenceResponse(
-                        success=False,
-                        message=f"Failed to process {file.filename}: {str(e)}",
-                    ),
-                }
-            )
-
-    return {"batch_results": results}
-
+        raise HTTPException(status_code=500, detail=f"Detection failed: {str(e)}")
 
 @app.get("/models/status")
 async def models_status():
     """Get model loading status and information"""
-    # Trigger lazy loading to get accurate status
-    trigger_lazy_load()
-
     # Safely check GPU memory only if torch is available
     gpu_memory_gb = 0
     gpu_memory_total_gb = 0
 
     if heavy_imports_loaded and torch is not None and torch.cuda.is_available():
-        gpu_memory_gb = torch.cuda.memory_allocated() / 1024**3
-        gpu_memory_total_gb = torch.cuda.get_device_properties(
-            0).total_memory / 1024**3
+        # Use nvidia-smi for accurate VRAM measurement
+        try:
+            import subprocess
+            result = subprocess.run([
+                'nvidia-smi', '--query-gpu=memory.used,memory.total', 
+                '--format=csv,noheader,nounits'
+            ], capture_output=True, text=True, timeout=5)
+            
+            if result.returncode == 0:
+                lines = result.stdout.strip().split('\n')
+                if lines and lines[0]:
+                    # Take the first GPU (index 0)
+                    used_mb, total_mb = lines[0].split(', ')
+                    gpu_memory_gb = float(used_mb) / 1024  # Convert MB to GB
+                    gpu_memory_total_gb = float(total_mb) / 1024
+            else:
+                # Fallback to torch method
+                gpu_memory_gb = torch.cuda.memory_allocated() / 1024**3
+                gpu_memory_total_gb = torch.cuda.get_device_properties(0).total_memory / 1024**3
+                
+        except (subprocess.TimeoutExpired, subprocess.CalledProcessError, FileNotFoundError):
+            # Fallback to torch method
+            gpu_memory_gb = torch.cuda.memory_allocated() / 1024**3
+            gpu_memory_total_gb = torch.cuda.get_device_properties(0).total_memory / 1024**3
 
     return {
         "hadm_l_loaded": hadm_l_model is not None,
@@ -996,24 +1051,15 @@ async def models_status():
         "gpu_memory_total_gb": gpu_memory_total_gb,
     }
 
-
-@app.post("/models/reload")
-async def reload_models():
-    """Reload models (useful for updates)"""
-    success = load_models()
-    return {
-        "success": success,
-        "message": (
-            "Models reloaded successfully" if success else "Failed to reload models"
-        ),
-    }
-
-
 @app.get("/interface")
 async def web_interface(request: Request):
     """Web interface for uploading images and viewing detection results"""
+    # Check authentication
+    auth_cookie = request.cookies.get("authenticated")
+    if auth_cookie != "true":
+        return RedirectResponse(url="/login")
+    
     return templates.TemplateResponse("interface.html", {"request": request})
-
 
 @app.post("/interface/detect")
 async def web_detect_artifacts(
@@ -1022,8 +1068,10 @@ async def web_detect_artifacts(
     """
     Web interface endpoint for artifact detection with visual results
     """
-    trigger_lazy_load()
-
+    # Check authentication
+    auth_cookie = request.cookies.get("authenticated")
+    if auth_cookie != "true":
+        return RedirectResponse(url="/login")
     # Check if models are still loading
     if models_loading:
         return templates.TemplateResponse(
@@ -1040,7 +1088,7 @@ async def web_detect_artifacts(
             "interface.html",
             {
                 "request": request,
-                "error": "HADM-L model not loaded. Please check model status.",
+                "error": "HADM-L model not loaded. Please load the model first.",
             },
         )
 
@@ -1049,7 +1097,7 @@ async def web_detect_artifacts(
             "interface.html",
             {
                 "request": request,
-                "error": "HADM-G model not loaded. Please check model status.",
+                "error": "HADM-G model not loaded. Please load the model first.",
             },
         )
 
@@ -1063,8 +1111,7 @@ async def web_detect_artifacts(
     # Validate file type
     if not file.content_type or not file.content_type.startswith("image/"):
         return templates.TemplateResponse(
-            "interface.html", {"request": request,
-                               "error": "File must be an image"}
+            "interface.html", {"request": request, "error": "File must be an image"}
         )
 
     try:
@@ -1114,42 +1161,132 @@ async def web_detect_artifacts(
             {"request": request, "error": f"Detection failed: {str(e)}"},
         )
 
+@app.get("/api/logs")
+async def get_logs(username: str = Depends(verify_credentials)):
+    """Get system logs from log files"""
+    import re
+    from datetime import datetime
+    
+    def parse_log_line(line: str) -> Dict[str, str]:
+        """Parse a log line and extract timestamp, level, and message"""
+        # Handle different log formats
+        # Format 1: INFO:api:message
+        # Format 2: INFO:     ip - "request" status
+        # Format 3: [timestamp] message
+        
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        level = "INFO"
+        message = line.strip()
+        
+        # Try to extract timestamp from [HH:MM:SS] format
+        timestamp_match = re.search(r'\[(\d{2}:\d{2}:\d{2})\]', line)
+        if timestamp_match:
+            timestamp = timestamp_match.group(1)
+            message = re.sub(r'\[\d{2}:\d{2}:\d{2}\]\s*', '', line).strip()
+        
+        # Try to extract log level
+        level_match = re.search(r'(DEBUG|INFO|WARN|WARNING|ERROR|CRITICAL)', line)
+        if level_match:
+            level = level_match.group(1)
+            if level == "WARNING":
+                level = "WARN"
+        
+        # Clean up the message
+        message = re.sub(r'^(DEBUG|INFO|WARN|WARNING|ERROR|CRITICAL):\s*', '', message)
+        message = re.sub(r'^[^:]*:\s*', '', message)  # Remove logger name
+        
+        return {
+            "timestamp": timestamp,
+            "level": level,
+            "message": message
+        }
+    
+    def read_log_file(path: Path, max_lines: int = 100) -> List[Dict[str, str]]:
+        """Read and parse log file"""
+        if not path.exists():
+            return []
+        
+        try:
+            with open(path, 'r') as f:
+                lines = f.readlines()
+            
+            # Get last max_lines
+            lines = lines[-max_lines:] if len(lines) > max_lines else lines
+            
+            parsed_logs = []
+            for line in lines:
+                if line.strip():  # Skip empty lines
+                    parsed_logs.append(parse_log_line(line))
+            
+            return parsed_logs
+        except Exception as e:
+            logger.error(f"Error reading log file {path}: {e}")
+            return []
+    
+    try:
+        log_dir = Path("logs")
+        date_str = datetime.now().strftime("%Y-%m-%d")
+        
+        # Read API logs (acts as both uvicorn and general logs)
+        api_log_file = log_dir / f"api-{date_str}.log"
+        api_logs = read_log_file(api_log_file)
+        
+        # Filter logs for different categories
+        uvicorn_logs = []
+        hadm_l_logs = []
+        hadm_g_logs = []
+        
+        for log_entry in api_logs:
+            message = log_entry["message"].lower()
+            
+            # Categorize logs
+            if any(keyword in message for keyword in ["http", "request", "response", "uvicorn", "started server"]):
+                uvicorn_logs.append(log_entry)
+            elif any(keyword in message for keyword in ["hadm-l", "hadm_l", "local"]):
+                hadm_l_logs.append(log_entry)
+            elif any(keyword in message for keyword in ["hadm-g", "hadm_g", "global"]):
+                hadm_g_logs.append(log_entry)
+            else:
+                # General logs go to uvicorn category
+                uvicorn_logs.append(log_entry)
+        
+        return {
+            "success": True,
+            "logs": {
+                "uvicorn": uvicorn_logs[-50:],  # Last 50 entries
+                "hadm-l": hadm_l_logs[-50:],
+                "hadm-g": hadm_g_logs[-50:]
+            }
+        }
+    
+    except Exception as e:
+        logger.error(f"Error getting logs: {str(e)}")
+        return {
+            "success": False,
+            "message": f"Error reading logs: {str(e)}",
+            "logs": {
+                "uvicorn": [],
+                "hadm-l": [],
+                "hadm-g": []
+            }
+        }
 
 # Startup event
 @app.on_event("startup")
 async def startup_event():
-    """Initialize models on startup"""
-    logger.info("Starting HADM FastAPI Server...")
+    """Initialize server on startup"""
+    logger.info("Starting HADM Unified Server...")
 
     if lazy_mode:
-        logger.info(
-            "LAZY MODE: Server is ready. Models will load on first request.")
-        logger.info("HADM FastAPI Server started successfully in lazy mode")
+        logger.info("LAZY MODE: Server is ready. Models will load when requested.")
+        logger.info("HADM Unified Server started successfully in lazy mode")
     else:
-        logger.info(
-            "Server is ready to accept requests. Models will load in background..."
-        )
-
-        # Load models in background thread to avoid blocking startup
-        def load_models_background():
-            success = load_models()
-            if not success:
-                logger.error("Failed to load models in background")
-            else:
-                logger.info("HADM models loaded successfully in background")
-
-        # Start model loading in background
-        model_thread = threading.Thread(
-            target=load_models_background, daemon=True)
-        model_thread.start()
-
-        logger.info("HADM FastAPI Server started successfully")
-
+        logger.info("Server is ready. Heavy imports loaded at startup.")
+        logger.info("HADM Unified Server started successfully")
 
 if __name__ == "__main__":
     print(f"[{time.strftime('%H:%M:%S.%f')[:-3]}] About to start uvicorn server...")
     start_uvicorn_run = time.time()
 
     # Run the server
-    uvicorn.run("api:app", host="0.0.0.0", port=8080,
-                reload=False, log_level="info")
+    uvicorn.run("api:app", host="0.0.0.0", port=8080, reload=False, log_level="info")
