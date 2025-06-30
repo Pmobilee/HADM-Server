@@ -69,3 +69,4 @@ demo/outputs/*
 !figure/teaser.png
 venv/
 
+.env

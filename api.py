@@ -40,6 +40,31 @@ def log_import_time(name):
 
 
 print(f"[{time.strftime('%H:%M:%S.%f')[:-3]}] Starting unified api.py...")
+
+# Load environment variables
+def load_env_file():
+    """Load environment variables from .env file"""
+    env_file = Path(".env")
+    if not env_file.exists():
+        print(f"[{time.strftime('%H:%M:%S.%f')[:-3]}] ERROR: .env file not found!")
+        print(f"[{time.strftime('%H:%M:%S.%f')[:-3]}] Please copy .env_example to .env and configure your settings")
+        sys.exit(1)
+    
+    try:
+        with open(env_file, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith('#') and '=' in line:
+                    key, value = line.split('=', 1)
+                    os.environ[key.strip()] = value.strip()
+    except Exception as e:
+        print(f"[{time.strftime('%H:%M:%S.%f')[:-3]}] ERROR: Failed to load .env file: {e}")
+        sys.exit(1)
+
+# Load environment variables first
+load_env_file()
+print(f"[{time.strftime('%H:%M:%S.%f')[:-3]}] Environment variables loaded from .env")
+
 if lazy_mode:
     print(f"[{time.strftime('%H:%M:%S.%f')[:-3]}] LAZY MODE: Heavy imports will be deferred until model loading")
 
@@ -149,8 +174,15 @@ model_load_lock = threading.Lock()
 
 # Authentication
 security = HTTPBasic()
-ADMIN_USERNAME = "intelligents"
-ADMIN_PASSWORD = "intelligentsintelligents"
+ADMIN_USERNAME = os.getenv("ADMIN_USERNAME")
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD")
+API_KEY = os.getenv("API_KEY")
+
+# Validate required environment variables
+if not ADMIN_USERNAME or not ADMIN_PASSWORD or not API_KEY:
+    logger.error("Missing required environment variables. Please check your .env file.")
+    logger.error("Required: ADMIN_USERNAME, ADMIN_PASSWORD, API_KEY")
+    sys.exit(1)
 
 def ensure_heavy_imports():
     """Ensure heavy imports are loaded - decorator-friendly version"""
@@ -235,6 +267,15 @@ def verify_credentials(credentials: HTTPBasicCredentials = Depends(security)):
             headers={"WWW-Authenticate": "Basic"},
         )
     return credentials.username
+
+def verify_api_key(api_key: str = None):
+    """Verify API key from header or query parameter"""
+    if api_key != API_KEY:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid API key"
+        )
+    return True
 
 # Utility context manager for timing steps with logging
 @contextlib.contextmanager
@@ -327,10 +368,9 @@ def load_hadm_model(config_path: str, model_path: str, model_name: str):
 
         # Update model checkpoint path
         if hasattr(cfg, "train") and hasattr(cfg.train, "init_checkpoint"):
-            cfg.train.init_checkpoint = str(
-                Path("pretrained_models/eva02_L_coco_det_sys_o365.pth")
-            )
-            logger.info(f"Updated init_checkpoint for {model_name}")
+            eva02_path = os.getenv("EVA02_BACKBONE_PATH", "pretrained_models/eva02_L_coco_det_sys_o365.pth")
+            cfg.train.init_checkpoint = str(Path(eva02_path))
+            logger.info(f"Updated init_checkpoint for {model_name} to {eva02_path}")
 
         # Clean up any device references in model config to avoid conflicts
         if hasattr(cfg.model, "device"):
@@ -431,13 +471,11 @@ def load_model_by_type(model_type: str):
                     device = torch.device("cpu")
                     logger.warning("CUDA not available, using CPU")
 
-            model_dir = Path("pretrained_models")
-            
             if model_type == "hadm_l":
                 if hadm_l_model is not None:
                     return {"success": True, "message": "HADM-L model is already loaded"}
                 
-                hadm_l_path = model_dir / "HADM-L_0249999.pth"
+                hadm_l_path = Path(os.getenv("HADM_L_MODEL_PATH", "pretrained_models/HADM-L_0249999.pth"))
                 if hadm_l_path.exists():
                     hadm_l_config = "projects/ViTDet/configs/eva2_o365_to_coco/demo_local.py"
                     with log_time("Total HADM-L load time"):
@@ -452,7 +490,7 @@ def load_model_by_type(model_type: str):
                 if hadm_g_model is not None:
                     return {"success": True, "message": "HADM-G model is already loaded"}
                 
-                hadm_g_path = model_dir / "HADM-G_0249999.pth"
+                hadm_g_path = Path(os.getenv("HADM_G_MODEL_PATH", "pretrained_models/HADM-G_0249999.pth"))
                 if hadm_g_path.exists():
                     hadm_g_config = "projects/ViTDet/configs/eva2_o365_to_coco/demo_global.py"
                     with log_time("Total HADM-G load time"):
@@ -1006,6 +1044,73 @@ async def detect_artifacts(
         logger.error(f"Detection endpoint failed: {e}")
         raise HTTPException(status_code=500, detail=f"Detection failed: {str(e)}")
 
+@app.post("/api/v1/detect", response_model=InferenceResponse)
+async def detect_artifacts_api_key(
+    file: UploadFile = File(...), 
+    mode: str = "both",
+    api_key: str = None
+):
+    """
+    Detect artifacts in uploaded image using API key authentication
+    
+    Args:
+        file: Image file (JPEG format preferred)
+        mode: Detection mode - 'local', 'global', or 'both'
+        api_key: API key for authentication (can be passed as query param or header)
+    
+    Returns:
+        Detection results with bounding boxes and artifact information
+    """
+    # Verify API key
+    verify_api_key(api_key)
+    
+    # Check if models are still loading
+    if models_loading:
+        raise HTTPException(
+            status_code=503,
+            detail="Models are still loading. Please try again in a few moments.",
+        )
+
+    # Check if required models are loaded
+    if mode in ["local", "both"] and hadm_l_model is None:
+        raise HTTPException(
+            status_code=503,
+            detail="HADM-L model not loaded. Please load the model first.",
+        )
+
+    if mode in ["global", "both"] and hadm_g_model is None:
+        raise HTTPException(
+            status_code=503,
+            detail="HADM-G model not loaded. Please load the model first.",
+        )
+
+    # Validate mode
+    if mode not in ["local", "global", "both"]:
+        raise HTTPException(
+            status_code=400, detail="Mode must be 'local', 'global', or 'both'"
+        )
+
+    # Validate file type
+    if not file.content_type or not file.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="File must be an image")
+
+    try:
+        # Ensure heavy imports are loaded
+        ensure_heavy_imports()
+
+        # Read image
+        image_data = await file.read()
+        image = Image.open(io.BytesIO(image_data))
+
+        # Process inference
+        result = process_inference_request(image, mode)
+
+        return result
+
+    except Exception as e:
+        logger.error(f"API detection endpoint failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Detection failed: {str(e)}")
+
 @app.get("/models/status")
 async def models_status():
     """Get model loading status and information"""
@@ -1288,5 +1393,10 @@ if __name__ == "__main__":
     print(f"[{time.strftime('%H:%M:%S.%f')[:-3]}] About to start uvicorn server...")
     start_uvicorn_run = time.time()
 
+    # Get server configuration from environment
+    host = os.getenv("SERVER_HOST", "0.0.0.0")
+    port = int(os.getenv("SERVER_PORT", "8080"))
+    log_level = os.getenv("LOG_LEVEL", "info").lower()
+
     # Run the server
-    uvicorn.run("api:app", host="0.0.0.0", port=8080, reload=False, log_level="info")
+    uvicorn.run("api:app", host=host, port=port, reload=False, log_level=log_level)
