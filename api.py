@@ -268,12 +268,29 @@ def verify_credentials(credentials: HTTPBasicCredentials = Depends(security)):
         )
     return credentials.username
 
-def verify_api_key(api_key: str = None):
+def verify_api_key(request: Request, api_key: str = None):
     """Verify API key from header or query parameter"""
-    if api_key != API_KEY:
+    # Try to get API key from multiple sources
+    provided_key = api_key
+    
+    # Check query parameter first
+    if not provided_key:
+        provided_key = request.query_params.get("api_key")
+    
+    # Check headers
+    if not provided_key:
+        provided_key = request.headers.get("X-API-Key")
+    
+    # Check Authorization header
+    if not provided_key:
+        auth_header = request.headers.get("Authorization")
+        if auth_header and auth_header.startswith("Bearer "):
+            provided_key = auth_header[7:]  # Remove "Bearer " prefix
+    
+    if not provided_key or provided_key != API_KEY:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid API key"
+            detail="Invalid or missing API key. Provide via 'api_key' query parameter, 'X-API-Key' header, or 'Authorization: Bearer <key>' header."
         )
     return True
 
@@ -900,8 +917,9 @@ async def health_check():
     }
 
 @app.get("/api/diagnostics")
-async def get_diagnostics(username: str = Depends(verify_credentials)):
+async def get_diagnostics(request: Request, api_key: str = None):
     """Get system diagnostics"""
+    verify_api_key(request, api_key)
     try:
         # Get current status
         gpu_memory_gb = 0
@@ -959,8 +977,9 @@ async def get_diagnostics(username: str = Depends(verify_credentials)):
         }
 
 @app.post("/api/control/{command}")
-async def control_command(command: str, username: str = Depends(verify_credentials)):
+async def control_command(command: str, request: Request, api_key: str = None):
     """Send control command to load/unload models"""
+    verify_api_key(request, api_key)
     try:
         valid_commands = ['load_l', 'unload_l', 'load_g', 'unload_g']
         if command not in valid_commands:
@@ -983,9 +1002,10 @@ async def control_command(command: str, username: str = Depends(verify_credentia
 
 @app.post("/api/detect", response_model=InferenceResponse)
 async def detect_artifacts(
+    request: Request,
     file: UploadFile = File(...), 
     mode: str = "both",
-    username: str = Depends(verify_credentials)
+    api_key: str = None
 ):
     """
     Detect artifacts in uploaded image
@@ -997,6 +1017,8 @@ async def detect_artifacts(
     Returns:
         Detection results with bounding boxes and artifact information
     """
+    verify_api_key(request, api_key)
+    
     # Check if models are still loading
     if models_loading:
         raise HTTPException(
@@ -1046,6 +1068,7 @@ async def detect_artifacts(
 
 @app.post("/api/v1/detect", response_model=InferenceResponse)
 async def detect_artifacts_api_key(
+    request: Request,
     file: UploadFile = File(...), 
     mode: str = "both",
     api_key: str = None
@@ -1062,7 +1085,7 @@ async def detect_artifacts_api_key(
         Detection results with bounding boxes and artifact information
     """
     # Verify API key
-    verify_api_key(api_key)
+    verify_api_key(request, api_key)
     
     # Check if models are still loading
     if models_loading:
@@ -1112,8 +1135,10 @@ async def detect_artifacts_api_key(
         raise HTTPException(status_code=500, detail=f"Detection failed: {str(e)}")
 
 @app.get("/models/status")
-async def models_status():
+async def models_status(request: Request, api_key: str = None):
     """Get model loading status and information"""
+    verify_api_key(request, api_key)
+    
     # Safely check GPU memory only if torch is available
     gpu_memory_gb = 0
     gpu_memory_total_gb = 0
