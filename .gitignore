@@ -10,10 +10,10 @@ instant_test_output
 inference_test_output
 
 
-*.png
+
 *.json
 *.diff
-*.jpg
+
 !/projects/DensePose/doc/images/*.jpg
 
 # compilation and distribution
@@ -70,3 +70,5 @@ demo/outputs/*
 venv/
 
 .env
+test_images/woman_bathroom_high.png
+test_images/woman_bathroom.jpg
