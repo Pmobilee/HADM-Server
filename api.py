@@ -891,7 +891,10 @@ async def dashboard(request: Request):
     if auth_cookie != "true":
         return RedirectResponse(url="/login")
     
-    return templates.TemplateResponse("dashboard.html", {"request": request})
+    return templates.TemplateResponse("dashboard.html", {
+        "request": request, 
+        "api_key": API_KEY
+    })
 
 @app.get("/health")
 async def health_check():
@@ -1292,8 +1295,10 @@ async def web_detect_artifacts(
         )
 
 @app.get("/api/logs")
-async def get_logs(username: str = Depends(verify_credentials)):
+async def get_logs(request: Request, api_key: str = None):
     """Get system logs from log files"""
+    verify_api_key(request, api_key)
+    
     import re
     from datetime import datetime
     

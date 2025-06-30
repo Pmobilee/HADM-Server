@@ -736,12 +736,9 @@
             hideError();
 
             try {
-                const response = await fetch('/api/detect', {
+                const response = await fetch('/api/detect?api_key={{ api_key }}', {
                     method: 'POST',
-                    body: formData,
-                    headers: {
-                        'Authorization': 'Basic ' + btoa('intelligents:intelligentsintelligents')
-                    }
+                    body: formData
                 });
 
                 const result = await response.json();
@@ -813,11 +810,8 @@
             button.textContent = 'Processing...';
 
             try {
-                const response = await fetch(`/api/control/${command}`, {
-                    method: 'POST',
-                    headers: {
-                        'Authorization': 'Basic ' + btoa('intelligents:intelligentsintelligents')
-                    }
+                const response = await fetch(`/api/control/${command}?api_key={{ api_key }}`, {
+                    method: 'POST'
                 });
 
                 const result = await response.json();
@@ -844,18 +838,12 @@
 
             try {
                 // Unload both models sequentially
-                const unloadL = await fetch('/api/control/unload_l', {
-                    method: 'POST',
-                    headers: {
-                        'Authorization': 'Basic ' + btoa('intelligents:intelligentsintelligents')
-                    }
+                const unloadL = await fetch('/api/control/unload_l?api_key={{ api_key }}', {
+                    method: 'POST'
                 });
 
-                const unloadG = await fetch('/api/control/unload_g', {
-                    method: 'POST',
-                    headers: {
-                        'Authorization': 'Basic ' + btoa('intelligents:intelligentsintelligents')
-                    }
+                const unloadG = await fetch('/api/control/unload_g?api_key={{ api_key }}', {
+                    method: 'POST'
                 });
 
                 const resultL = await unloadL.json();
@@ -883,11 +871,7 @@
             if (!autoRefreshEnabled) return;
 
             try {
-                const response = await fetch('/api/diagnostics', {
-                    headers: {
-                        'Authorization': 'Basic ' + btoa('intelligents:intelligentsintelligents')
-                    }
-                });
+                const response = await fetch('/api/diagnostics?api_key={{ api_key }}');
 
                 const result = await response.json();
                 updateDiagnosticsDisplay(result);
@@ -1033,11 +1017,7 @@
             if (!autoRefreshEnabled) return;
 
             try {
-                const response = await fetch('/api/logs', {
-                    headers: {
-                        'Authorization': 'Basic ' + btoa('intelligents:intelligentsintelligents')
-                    }
-                });
+                const response = await fetch('/api/logs?api_key={{ api_key }}');
 
                 const result = await response.json();
                 if (result.success) {
