@@ -28,6 +28,7 @@ import argparse
 from typing import Optional, Dict, Any, List, Union
 from datetime import datetime
 import json
+import aiohttp
 
 # Check for lazy mode before any heavy imports
 lazy_mode = "--lazy" in sys.argv
@@ -320,6 +321,15 @@ class InferenceResponse(BaseModel):
     global_detections: Optional[List[DetectionResult]] = None
     processing_time: Optional[float] = None
 
+# Request models for different input types
+class ImageUrlRequest(BaseModel):
+    image_url: str = Field(..., description="URL of the image to analyze")
+    mode: str = Field(default="both", description="Detection mode: 'local', 'global', or 'both'")
+
+class ImageBase64Request(BaseModel):
+    image_base64: str = Field(..., description="Base64 encoded image data (without data:image/... prefix)")
+    mode: str = Field(default="both", description="Detection mode: 'local', 'global', or 'both'")
+
 # FastAPI app
 app = FastAPI(
     title="HADM Unified Server",
@@ -577,6 +587,95 @@ def preprocess_image(image):
     image_bgr = image_array[:, :, ::-1]  # RGB to BGR
 
     return image_bgr
+
+async def download_image_from_url(url: str):
+    """Download image from URL and return PIL Image"""
+    try:
+        timeout = aiohttp.ClientTimeout(total=30)  # 30 second timeout
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url) as response:
+                if response.status != 200:
+                    raise HTTPException(
+                        status_code=400, 
+                        detail=f"Failed to download image from URL. HTTP {response.status}"
+                    )
+                
+                # Check content type
+                content_type = response.headers.get('content-type', '')
+                if not content_type.startswith('image/'):
+                    raise HTTPException(
+                        status_code=400, 
+                        detail=f"URL does not point to an image. Content-Type: {content_type}"
+                    )
+                
+                # Read image data
+                image_data = await response.read()
+                
+                # Check file size (limit to 50MB)
+                if len(image_data) > 50 * 1024 * 1024:
+                    raise HTTPException(
+                        status_code=400, 
+                        detail="Image file too large. Maximum size is 50MB."
+                    )
+                
+                # Ensure heavy imports are loaded
+                ensure_heavy_imports()
+                
+                # Convert to PIL Image
+                image = Image.open(io.BytesIO(image_data))
+                return image
+                
+    except aiohttp.ClientError as e:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Failed to download image from URL: {str(e)}"
+        )
+    except Exception as e:
+        if isinstance(e, HTTPException):
+            raise e
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Error processing image from URL: {str(e)}"
+        )
+
+def decode_base64_image(base64_data: str):
+    """Decode base64 image data and return PIL Image"""
+    try:
+        # Ensure heavy imports are loaded
+        ensure_heavy_imports()
+        
+        # Remove data URL prefix if present
+        if base64_data.startswith('data:image/'):
+            base64_data = base64_data.split(',', 1)[1]
+        
+        # Decode base64
+        image_data = base64.b64decode(base64_data)
+        
+        # Check file size (limit to 50MB)
+        if len(image_data) > 50 * 1024 * 1024:
+            raise HTTPException(
+                status_code=400, 
+                detail="Image file too large. Maximum size is 50MB."
+            )
+        
+        # Convert to PIL Image
+        image = Image.open(io.BytesIO(image_data))
+        return image
+        
+    except Exception as decode_error:
+        if "Invalid base64" in str(decode_error) or "binascii" in str(decode_error):
+            raise HTTPException(
+                status_code=400, 
+                detail="Invalid base64 image data"
+            )
+        raise decode_error
+    except Exception as e:
+        if isinstance(e, HTTPException):
+            raise e
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Error processing base64 image: {str(e)}"
+        )
 
 def run_hadm_l_inference(image_array) -> List[DetectionResult]:
     """Run HADM-L (Local) inference on image"""
@@ -1135,6 +1234,126 @@ async def detect_artifacts_api_key(
 
     except Exception as e:
         logger.error(f"API detection endpoint failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Detection failed: {str(e)}")
+
+@app.post("/api/v1/detect-url", response_model=InferenceResponse)
+async def detect_artifacts_from_url(
+    request: Request,
+    image_request: ImageUrlRequest,
+    api_key: str = None
+):
+    """
+    Detect artifacts in image from URL using API key authentication
+    
+    Args:
+        image_request: Request containing image URL and detection mode
+        api_key: API key for authentication (can be passed as query param or header)
+    
+    Returns:
+        Detection results with bounding boxes and artifact information
+    """
+    # Verify API key
+    verify_api_key(request, api_key)
+    
+    # Check if models are still loading
+    if models_loading:
+        raise HTTPException(
+            status_code=503,
+            detail="Models are still loading. Please try again in a few moments.",
+        )
+
+    # Check if required models are loaded
+    if image_request.mode in ["local", "both"] and hadm_l_model is None:
+        raise HTTPException(
+            status_code=503,
+            detail="HADM-L model not loaded. Please load the model first.",
+        )
+
+    if image_request.mode in ["global", "both"] and hadm_g_model is None:
+        raise HTTPException(
+            status_code=503,
+            detail="HADM-G model not loaded. Please load the model first.",
+        )
+
+    # Validate mode
+    if image_request.mode not in ["local", "global", "both"]:
+        raise HTTPException(
+            status_code=400, detail="Mode must be 'local', 'global', or 'both'"
+        )
+
+    try:
+        # Download image from URL
+        image = await download_image_from_url(image_request.image_url)
+
+        # Process inference
+        result = process_inference_request(image, image_request.mode)
+
+        return result
+
+    except Exception as e:
+        logger.error(f"URL detection endpoint failed: {e}")
+        if isinstance(e, HTTPException):
+            raise e
+        raise HTTPException(status_code=500, detail=f"Detection failed: {str(e)}")
+
+@app.post("/api/v1/detect-base64", response_model=InferenceResponse)
+async def detect_artifacts_from_base64(
+    request: Request,
+    image_request: ImageBase64Request,
+    api_key: str = None
+):
+    """
+    Detect artifacts in base64 encoded image using API key authentication
+    
+    Args:
+        image_request: Request containing base64 image data and detection mode
+        api_key: API key for authentication (can be passed as query param or header)
+    
+    Returns:
+        Detection results with bounding boxes and artifact information
+    """
+    # Verify API key
+    verify_api_key(request, api_key)
+    
+    # Check if models are still loading
+    if models_loading:
+        raise HTTPException(
+            status_code=503,
+            detail="Models are still loading. Please try again in a few moments.",
+        )
+
+    # Check if required models are loaded
+    if image_request.mode in ["local", "both"] and hadm_l_model is None:
+        raise HTTPException(
+            status_code=503,
+            detail="HADM-L model not loaded. Please load the model first.",
+        )
+
+    if image_request.mode in ["global", "both"] and hadm_g_model is None:
+        raise HTTPException(
+            status_code=503,
+            detail="HADM-G model not loaded. Please load the model first.",
+        )
+
+    # Validate mode
+    if image_request.mode not in ["local", "global", "both"]:
+        raise HTTPException(
+            status_code=400, detail="Mode must be 'local', 'global', or 'both'"
+        )
+
+    try:
+        # Decode base64 image
+        image = decode_base64_image(image_request.image_base64)
+
+        # Process inference
+        result = process_inference_request(image, image_request.mode)
+
+        return result
+
+    except Exception as e:
+        logger.error(f"Base64 detection endpoint failed: {e}")
+        if isinstance(e, HTTPException):
+            raise e
         raise HTTPException(status_code=500, detail=f"Detection failed: {str(e)}")
 
 @app.get("/models/status")

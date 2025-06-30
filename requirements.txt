@@ -1,6 +1,7 @@
 absl-py==2.3.0
 addict==2.4.0
 aiofiles==24.1.0
+aiohttp==3.9.5
 aliyun-python-sdk-core==2.16.0
 aliyun-python-sdk-kms==2.16.5
 annotated-types==0.7.0

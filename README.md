@@ -44,8 +44,8 @@ Edit `.env` with your preferred credentials:
 
 ```bash
 # Authentication credentials
-ADMIN_USERNAME=intelligents
-ADMIN_PASSWORD=intelligentsintelligents
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD=password
 
 # API Key for secure API access (generate a new one for production)
 API_KEY=hadm_7k9m2n4p8q1r5s3t6v9w2x5z8a1b4c7e
@@ -98,7 +98,7 @@ chmod +x start_server.sh
 - **Web Dashboard**: http://localhost:8080/dashboard
 - **Simple Interface**: http://localhost:8080/interface  
 - **API Documentation**: http://localhost:8080/docs (Interactive Swagger UI)
-- **Login**: Use credentials from your `.env` file (default: intelligents/intelligentsintelligents)
+- **Login**: Use credentials from your `.env` file (default: admin/password)
 
 ## Usage
 
@@ -114,23 +114,38 @@ chmod +x start_server.sh
 
 ### REST API
 
-#### Quick Test Example
+#### Quick Test Examples
 
-Once your server is running, test it with a sample image:
+Once your server is running, test it with different input methods:
 
 ```bash
-# Test with the example API key from .env_example
+# Test with file upload (original method)
 curl -X POST \
   -H "X-API-Key: hadm_7k9m2n4p8q1r5s3t6v9w2x5z8a1b4c7e" \
   -F "file=@artifacts.png" \
   -F "mode=both" \
   http://localhost:8080/api/v1/detect
+
+# Test with image URL
+curl -X POST \
+  -H "X-API-Key: hadm_7k9m2n4p8q1r5s3t6v9w2x5z8a1b4c7e" \
+  -H "Content-Type: application/json" \
+  -d '{"image_url": "https://example.com/test-image.jpg", "mode": "both"}' \
+  http://localhost:8080/api/v1/detect-url
+
+# Test with base64 encoded image
+curl -X POST \
+  -H "X-API-Key: hadm_7k9m2n4p8q1r5s3t6v9w2x5z8a1b4c7e" \
+  -H "Content-Type: application/json" \
+  -d '{"image_base64": "iVBORw0KGgoAAAANSUhEUgAA...", "mode": "both"}' \
+  http://localhost:8080/api/v1/detect-base64
 ```
 
 #### API Key Authentication (Recommended)
 
-The API key from your `.env` file is used for all programmatic access:
+The API key from your `.env` file is used for all programmatic access. The API supports three input methods:
 
+**1. File Upload (Traditional)**
 ```bash
 # Using query parameter
 curl -X POST \
@@ -153,10 +168,34 @@ curl -X POST \
   http://localhost:8080/api/v1/detect
 ```
 
+**2. Image URL**
+```bash
+curl -X POST \
+  -H "X-API-Key: your_api_key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "image_url": "https://example.com/image.jpg",
+    "mode": "both"
+  }' \
+  http://localhost:8080/api/v1/detect-url
+```
+
+**3. Base64 Encoded Image**
+```bash
+curl -X POST \
+  -H "X-API-Key: your_api_key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "image_base64": "iVBORw0KGgoAAAANSUhEUgAA...",
+    "mode": "both"
+  }' \
+  http://localhost:8080/api/v1/detect-base64
+```
+
 #### Basic Authentication (Alternative)
 
 ```bash
-curl -u intelligents:intelligentsintelligents \
+curl -u admin:password \
   -X POST \
   -F "file=@image.jpg" \
   -F "mode=both" \
@@ -235,8 +274,8 @@ The `start_server.sh` script provides comprehensive server management:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ADMIN_USERNAME` | intelligents | Web dashboard username |
-| `ADMIN_PASSWORD` | intelligentsintelligents | Web dashboard password |
+| `ADMIN_USERNAME` | admin | Web dashboard username |
+| `ADMIN_PASSWORD` | password | Web dashboard password |
 | `API_KEY` | (random) | API key for programmatic access |
 | `SERVER_HOST` | 0.0.0.0 | Server bind address |
 | `SERVER_PORT` | 8080 | Server port |
@@ -270,8 +309,10 @@ Based on the original HADM paper methodology:
 - `GET /interface` - Simple interface (requires auth)
 
 ### Detection Endpoints
-- `POST /api/detect` - Detect artifacts (Basic Auth)
-- `POST /api/v1/detect` - Detect artifacts (API Key) - **Recommended**
+- `POST /api/detect` - Detect artifacts from file upload (Basic Auth)
+- `POST /api/v1/detect` - Detect artifacts from file upload (API Key) - **Recommended**
+- `POST /api/v1/detect-url` - Detect artifacts from image URL (API Key)
+- `POST /api/v1/detect-base64` - Detect artifacts from base64 image (API Key)
 - `POST /interface/detect` - Web form detection (Cookie Auth)
 
 ### Management Endpoints
@@ -455,4 +496,4 @@ For issues related to:
 - Web Dashboard: http://localhost:8080/dashboard
 - API Documentation: http://localhost:8080/docs
 - Simple Interface: http://localhost:8080/interface
-- Default Login: intelligents / intelligentsintelligents
+- Default Login: admin / password
