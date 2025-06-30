@@ -15,8 +15,8 @@ A unified FastAPI server that provides both web dashboard and REST API endpoints
 
 | Feature | Screenshot |
 |---------|------------|
-| **Control Dashboard** | ![HADM Control Center](HADM_control_center.png) |
-| **Detection Results** | ![Detection Results](detection_results.png) |
+| **Control Dashboard** | ![HADM Control Center](HADM_Control_Center.png) |
+| **Detection Results** | ![Detection Results](Detection_results.png) |
 | **API Documentation** | Available at `/docs` (Swagger UI style) |
 
 ## Features
