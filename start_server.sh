@@ -397,7 +397,6 @@ case "${1:-start}" in
         echo "Access points:"
         echo "  Web Dashboard: http://localhost:$WEB_PORT/dashboard"
         echo "  API Docs:      http://localhost:$WEB_PORT/docs"
-        echo "  Login:         intelligents / intelligentsintelligents"
         exit 1
         ;;
 esac 

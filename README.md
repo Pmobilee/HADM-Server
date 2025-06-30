@@ -45,8 +45,8 @@ cp .env_example .env
 ### Edit Environment Variables
 ```bash
 # Authentication credentials
-ADMIN_USERNAME=intelligents
-ADMIN_PASSWORD=intelligentsintelligents
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD=password
 
 # API Key for secure API access (generate a new one for production)
 API_KEY=hadm_7k9m2n4p8q1r5s3t6v9w2x5z8a1b4c7e
@@ -110,7 +110,7 @@ Once the server is running, access it via:
 - **Web Dashboard**: http://localhost:8080/dashboard
 - **Simple Interface**: http://localhost:8080/interface  
 - **API Documentation**: http://localhost:8080/docs (Interactive Swagger UI)
-- **Login**: Use credentials from your `.env` file (default: intelligents/intelligentsintelligents)
+- **Login**: Use credentials from your `.env` file (default: admin/password)
 
 </details>
 
@@ -226,7 +226,7 @@ curl -X POST \
 <summary><strong>Basic Authentication (Alternative)</strong></summary>
 
 ```bash
-curl -u intelligents:intelligentsintelligents \
+curl -u admin:password \
   -X POST \
   -F "file=@image.jpg" \
   -F "mode=both" \
@@ -325,8 +325,8 @@ The `start_server.sh` script provides comprehensive server management:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ADMIN_USERNAME` | intelligents | Web dashboard username |
-| `ADMIN_PASSWORD` | intelligentsintelligents | Web dashboard password |
+| `ADMIN_USERNAME` | admin | Web dashboard username |
+| `ADMIN_PASSWORD` | password | Web dashboard password |
 | `API_KEY` | (random) | API key for programmatic access |
 | `SERVER_HOST` | 0.0.0.0 | Server bind address |
 | `SERVER_PORT` | 8080 | Server port |
@@ -632,6 +632,6 @@ For issues related to:
 - Web Dashboard: http://localhost:8080/dashboard
 - API Documentation: http://localhost:8080/docs
 - Simple Interface: http://localhost:8080/interface
-- Default Login: intelligents / intelligentsintelligents
+- Default Login: admin / password
 
 </details>
