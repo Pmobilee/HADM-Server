@@ -16,6 +16,7 @@ import uuid
 from io import BytesIO
 from pathlib import Path
 from typing import Optional, Dict, Any, List
+from datetime import datetime
 
 import redis
 from rq import Queue
@@ -364,6 +365,100 @@ async def models_status():
     
     except Exception as e:
         return {"status": "error", "message": str(e)}
+
+LOG_DIR = Path("./logs")
+DATE_STR = datetime.now().strftime("%Y-%m-%d")
+
+@app.get("/api/logs")
+async def get_logs(username: str = Depends(verify_credentials)):
+    """Get system logs from various sources, filtering out noise."""
+    
+    def parse_log_line(line: str) -> Dict[str, str]:
+        """Helper to parse a log line into a structured dictionary"""
+        line = line.strip()
+        timestamp = time.strftime("%H:%M:%S")
+        level = "INFO"
+        
+        if "ERROR" in line:
+            level = "ERROR"
+        elif "WARNING" in line:
+            level = "WARN"
+        elif "DEBUG" in line:
+            level = "DEBUG"
+            
+        try:
+            # Attempt to extract timestamp and level from worker logs
+            parts = line.split(' - ')
+            if len(parts) >= 4:
+                timestamp = parts[0].split(',')[0] # "asctime" format
+                level = parts[2] # "levelname" format
+                message = ' - '.join(parts[3:])
+                return {"timestamp": timestamp, "level": level, "message": message}
+        except:
+            pass # Fallback to simpler parsing
+
+        return {"timestamp": timestamp, "level": level, "message": line}
+
+    def read_log_file(path: Path, max_lines: int, filter_status: bool = False) -> List[Dict[str, str]]:
+        """Reads and parses the last N lines of a log file."""
+        if not path.exists():
+            return [{"timestamp": time.strftime("%H:%M:%S"), "level": "WARN", "message": f"Log file not found: {path}"}]
+        
+        try:
+            with open(path, 'r') as f:
+                lines = f.readlines()
+                
+                parsed_lines = []
+                for line in lines[-max_lines:]:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    # Filter out noisy RQ status checks from worker logs
+                    if filter_status and "handle_control_command" in line and "'command': 'status'" in line:
+                        continue
+                    parsed_lines.append(parse_log_line(line))
+                return parsed_lines
+        except Exception as e:
+            return [{"timestamp": time.strftime("%H:%M:%S"), "level": "ERROR", "message": f"Error reading {path}: {e}"}]
+
+    try:
+        worker_log_path = LOG_DIR / f"worker-{DATE_STR}.log"
+        uvicorn_log_path = LOG_DIR / f"uvicorn-{DATE_STR}.log"
+        redis_log_path = LOG_DIR / f"redis-{DATE_STR}.log"
+
+        worker_logs = read_log_file(worker_log_path, 200, filter_status=True)
+        
+        hadm_l_logs = [log for log in worker_logs if "HADM-L" in log["message"]]
+        hadm_g_logs = [log for log in worker_logs if "HADM-G" in log["message"]]
+        
+        # If no specific model logs, show all worker logs as a fallback
+        if not hadm_l_logs:
+             hadm_l_logs = list(worker_logs)
+        if not hadm_g_logs:
+             hadm_g_logs = list(worker_logs)
+
+        # Combine system-level logs
+        uvicorn_logs = read_log_file(uvicorn_log_path, 50)
+        redis_logs = read_log_file(redis_log_path, 50)
+        system_logs = redis_logs + uvicorn_logs
+        
+        # Sort logs by timestamp if possible, otherwise just combine
+        try:
+            system_logs.sort(key=lambda x: x.get("timestamp", ""))
+        except:
+            pass
+
+        logs = {
+            "uvicorn": system_logs,
+            "hadm-l": hadm_l_logs,
+            "hadm-g": hadm_g_logs
+        }
+        
+        return {"success": True, "logs": logs}
+    
+    except Exception as e:
+        logger.error(f"Error getting logs: {str(e)}")
+        return {"success": False, "message": f"Error: {str(e)}", "logs": {}}
 
 if __name__ == "__main__":
     uvicorn.run(

@@ -15,9 +15,10 @@ import traceback
 from io import BytesIO
 from typing import Optional, Dict, Any, List
 import redis
-from rq import Worker, Queue, Connection, get_current_job
+from rq import Worker, Queue, get_current_job
 import numpy as np
 from PIL import Image
+from pathlib import Path
 
 # Setup logging
 logging.basicConfig(
@@ -25,6 +26,9 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+# Define project base directory
+BASE_DIR = Path(__file__).resolve().parent
 
 # Global variables for models
 hadm_l_model: Optional[Any] = None
@@ -100,43 +104,32 @@ def get_device():
     return device
 
 
-def load_hadm_model(config_path: str, model_path: str, model_name: str):
-    """Load a HADM model from config and checkpoint files"""
-    logger.info(f"Loading {model_name} model...")
+def load_hadm_model(model_path: str, model_name: str):
+    """Load a HADM model from a checkpoint file, assuming it's a self-contained model."""
+    logger.info(f"Loading {model_name} model from {model_path}...")
     start_time = time.time()
 
-    if not os.path.exists(config_path):
-        raise FileNotFoundError(f"Config file not found: {config_path}")
-    if not os.path.exists(model_path):
+    if not Path(model_path).exists():
         raise FileNotFoundError(f"Model file not found: {model_path}")
 
-    # Load configuration
-    cfg = LazyConfig.load_file(config_path)
-
-    # Set device
     device = get_device()
 
-    # Build model
-    model = instantiate(cfg.model)
+    # Load the model directly. This assumes the .pth file contains the entire model object.
+    model = torch.load(model_path, map_location=device)
     model.to(device)
     model.eval()
 
-    # Load checkpoint
-    checkpointer = DetectionCheckpointer(model)
-    checkpointer.load(model_path)
-
-    # Create custom predictor class
+    # Create a custom predictor class that doesn't rely on a config object
     class HADMPredictor:
-        def __init__(self, model, cfg):
+        def __init__(self, model):
             self.model = model
-            self.cfg = cfg
             self.device = device
 
         def __call__(self, image_bgr):
             # Convert BGR to RGB
             image_rgb = image_bgr[:, :, ::-1]
 
-            # Apply transforms
+            # Apply transforms (these were hardcoded, so no config dependency)
             height, width = image_rgb.shape[:2]
             transform = T.ResizeShortestEdge([800], 1333)
             image_tensor = transform.get_transform(
@@ -152,7 +145,7 @@ def load_hadm_model(config_path: str, model_path: str, model_name: str):
 
             return predictions[0]
 
-    predictor = HADMPredictor(model, cfg)
+    predictor = HADMPredictor(model)
 
     duration = time.time() - start_time
     logger.info(
@@ -161,35 +154,29 @@ def load_hadm_model(config_path: str, model_path: str, model_name: str):
     return predictor
 
 
-def load_models():
+def load_models(force_reload: bool = False):
     """Load both HADM-L and HADM-G models"""
     global hadm_l_model, hadm_g_model
 
     logger.info("Loading HADM models...")
 
     # Model paths
-    base_path = "./pretrained_models"
-    hadm_l_config = os.path.join(base_path, "HADM-L", "config.yaml")
-    hadm_l_weights = os.path.join(base_path, "HADM-L", "model_final.pth")
-    hadm_g_config = os.path.join(base_path, "HADM-G", "config.yaml")
-    hadm_g_weights = os.path.join(base_path, "HADM-G", "model_final.pth")
+    base_path = BASE_DIR / "pretrained_models"
+    hadm_l_weights = base_path / "HADM-L" / "model_final.pth"
+    hadm_g_weights = base_path / "HADM-G" / "model_final.pth"
 
     try:
         # Load HADM-L
-        if os.path.exists(hadm_l_config) and os.path.exists(hadm_l_weights):
-            hadm_l_model = load_hadm_model(
-                hadm_l_config, hadm_l_weights, "HADM-L")
+        if hadm_l_weights.exists():
+            hadm_l_model = load_hadm_model(str(hadm_l_weights), "HADM-L")
         else:
-            logger.warning("HADM-L model files not found")
+            logger.warning(f"HADM-L model file not found: {hadm_l_weights}")
 
         # Load HADM-G
-        if os.path.exists(hadm_g_config) and os.path.exists(hadm_g_weights):
-            hadm_g_model = load_hadm_model(
-                hadm_g_config, hadm_g_weights, "HADM-G")
+        if hadm_g_weights.exists():
+            hadm_g_model = load_hadm_model(str(hadm_g_weights), "HADM-G")
         else:
-            logger.warning("HADM-G model files not found")
-
-        logger.info("Model loading completed")
+            logger.warning(f"HADM-G model file not found: {hadm_g_weights}")
 
     except Exception as e:
         logger.error(f"Error loading models: {str(e)}")
@@ -345,17 +332,15 @@ def handle_control_command(command_data):
 
     try:
         command = command_data.get('command')
-        logger.info(f"Handling control command: {command}")
+        # Suppress noisy status logs
+        if command != 'status':
+            logger.info(f"Handling control command: {command}")
 
         if command == 'load_l':
             if hadm_l_model is None:
-                base_path = "./pretrained_models"
-                hadm_l_config = os.path.join(
-                    base_path, "HADM-L", "config.yaml")
-                hadm_l_weights = os.path.join(
-                    base_path, "HADM-L", "model_final.pth")
-                hadm_l_model = load_hadm_model(
-                    hadm_l_config, hadm_l_weights, "HADM-L")
+                base_path = BASE_DIR / "pretrained_models"
+                hadm_l_weights = base_path / "HADM-L" / "model_final.pth"
+                hadm_l_model = load_hadm_model(str(hadm_l_weights), "HADM-L")
                 return {"success": True, "message": "HADM-L model loaded successfully"}
             else:
                 return {"success": True, "message": "HADM-L model already loaded"}
@@ -372,13 +357,9 @@ def handle_control_command(command_data):
 
         elif command == 'load_g':
             if hadm_g_model is None:
-                base_path = "./pretrained_models"
-                hadm_g_config = os.path.join(
-                    base_path, "HADM-G", "config.yaml")
-                hadm_g_weights = os.path.join(
-                    base_path, "HADM-G", "model_final.pth")
-                hadm_g_model = load_hadm_model(
-                    hadm_g_config, hadm_g_weights, "HADM-G")
+                base_path = BASE_DIR / "pretrained_models"
+                hadm_g_weights = base_path / "HADM-G" / "model_final.pth"
+                hadm_g_model = load_hadm_model(str(hadm_g_weights), "HADM-G")
                 return {"success": True, "message": "HADM-G model loaded successfully"}
             else:
                 return {"success": True, "message": "HADM-G model already loaded"}
@@ -424,7 +405,7 @@ def handle_control_command(command_data):
 # Initialize worker globally
 
 
-def initialize_worker():
+def initialize_worker(load_on_startup: bool = True):
     """Initialize worker with heavy imports and models"""
     logger.info("Initializing HADM Inference Worker...")
 
@@ -434,20 +415,26 @@ def initialize_worker():
     # Initialize device
     get_device()
 
-    # Load models on startup
-    try:
-        load_models()
-    except Exception as e:
-        logger.error(f"Failed to load models on startup: {str(e)}")
-        logger.info("Worker will continue without models loaded")
+    # Load models on startup unless disabled
+    if load_on_startup:
+        try:
+            load_models()
+        except Exception as e:
+            logger.error(f"Failed to load models on startup: {str(e)}")
+            logger.info("Worker will continue without models loaded")
+    else:
+        logger.info("Skipping model loading on startup as requested.")
 
 
 def main():
     """Main worker function"""
     logger.info("Starting HADM Inference Worker...")
 
+    # Check for --unload argument
+    load_on_startup = '--unload' not in sys.argv
+    
     # Initialize worker
-    initialize_worker()
+    initialize_worker(load_on_startup=load_on_startup)
 
     # Connect to Redis
     redis_conn = redis.Redis(host='localhost', port=6379, db=0)
@@ -455,9 +442,8 @@ def main():
     logger.info("Worker ready, listening for jobs...")
 
     # Start worker - RQ will handle the job dispatching
-    with Connection(redis_conn):
-        worker = Worker(['inference_q', 'control_q'], connection=redis_conn)
-        worker.work()
+    worker = Worker(['inference_q', 'control_q'], connection=redis_conn)
+    worker.work()
 
 
 if __name__ == '__main__':

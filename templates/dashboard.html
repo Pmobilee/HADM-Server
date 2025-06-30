@@ -344,6 +344,104 @@
             display: none;
         }
 
+        /* Logging styles */
+        .log-tabs {
+            display: flex;
+            border-bottom: 1px solid rgba(77, 182, 172, 0.2);
+            margin-bottom: 16px;
+        }
+
+        .log-tab {
+            background: none;
+            border: none;
+            color: #b0b0b0;
+            padding: 8px 16px;
+            cursor: pointer;
+            border-bottom: 2px solid transparent;
+            transition: all 0.3s ease;
+            font-weight: 500;
+        }
+
+        .log-tab.active {
+            color: #4db6ac;
+            border-bottom-color: #4db6ac;
+        }
+
+        .log-tab:hover {
+            color: #4db6ac;
+        }
+
+        .log-container {
+            position: relative;
+            height: 300px;
+            overflow: hidden;
+        }
+
+        .log-content {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 8px;
+            padding: 12px;
+            font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+            font-size: 12px;
+            line-height: 1.4;
+            color: #e0e0e0;
+            overflow-y: auto;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            display: none;
+        }
+
+        .log-content.active {
+            display: block;
+        }
+
+        .log-content::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        .log-content::-webkit-scrollbar-track {
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 4px;
+        }
+
+        .log-content::-webkit-scrollbar-thumb {
+            background: rgba(77, 182, 172, 0.5);
+            border-radius: 4px;
+        }
+
+        .log-content::-webkit-scrollbar-thumb:hover {
+            background: rgba(77, 182, 172, 0.7);
+        }
+
+        .log-entry {
+            margin-bottom: 4px;
+        }
+
+        .log-timestamp {
+            color: #4db6ac;
+        }
+
+        .log-level-INFO {
+            color: #4caf50;
+        }
+
+        .log-level-WARN {
+            color: #ff9800;
+        }
+
+        .log-level-ERROR {
+            color: #f44336;
+        }
+
+        .log-level-DEBUG {
+            color: #9e9e9e;
+        }
+
         /* Responsive design */
         @media (max-width: 1024px) {
             .main-container {
@@ -449,6 +547,27 @@
                     <button id="refresh-status-btn" class="btn btn-secondary">Refresh Status</button>
                 </div>
             </div>
+
+            <!-- System Logs Card -->
+            <div class="card">
+                <div class="card-header">
+                    <h2 class="card-title">System Logs</h2>
+                    <button id="clear-logs-btn" class="btn btn-secondary"
+                        style="margin-left: auto; padding: 4px 12px; font-size: 12px;">Clear</button>
+                </div>
+
+                <div class="log-tabs">
+                    <button class="log-tab active" data-log="uvicorn">Uvicorn</button>
+                    <button class="log-tab" data-log="hadm-l">HADM-L</button>
+                    <button class="log-tab" data-log="hadm-g">HADM-G</button>
+                </div>
+
+                <div class="log-container">
+                    <div id="uvicorn-log" class="log-content active"></div>
+                    <div id="hadm-l-log" class="log-content"></div>
+                    <div id="hadm-g-log" class="log-content"></div>
+                </div>
+            </div>
         </div>
 
         <!-- Right Column: Inference -->
@@ -548,6 +667,14 @@
             document.getElementById('load-g-btn').addEventListener('click', () => sendControlCommand('load_g'));
             document.getElementById('unload-g-btn').addEventListener('click', () => sendControlCommand('unload_g'));
             document.getElementById('refresh-status-btn').addEventListener('click', refreshDiagnostics);
+
+            // Log tabs
+            document.querySelectorAll('.log-tab').forEach(tab => {
+                tab.addEventListener('click', () => switchLogTab(tab.dataset.log));
+            });
+
+            // Clear logs button
+            document.getElementById('clear-logs-btn').addEventListener('click', clearCurrentLog);
         }
 
         function handleDragOver(e) {
@@ -765,21 +892,35 @@
                 document.getElementById('device-info').textContent =
                     data.device || 'Unknown';
 
-                if (data.vram_info && data.vram_info.total_memory) {
+                if (data.vram_info && Object.keys(data.vram_info).length > 0) {
                     const allocated = data.vram_info.allocated_memory || 0;
-                    const total = data.vram_info.total_memory;
-                    const percentage = (allocated / total) * 100;
+                    const total = data.vram_info.total_memory || 0;
 
-                    document.getElementById('vram-usage').textContent =
-                        `${allocated.toFixed(2)} / ${total.toFixed(2)} GB`;
-                    document.getElementById('vram-progress').style.width = `${percentage}%`;
+                    if (total > 0) {
+                        const percentage = (allocated / total) * 100;
+                        document.getElementById('vram-usage').textContent =
+                            `${allocated.toFixed(2)} / ${total.toFixed(2)} GB`;
+                        document.getElementById('vram-progress').style.width = `${percentage}%`;
+                    } else {
+                        document.getElementById('vram-usage').textContent = 'N/A';
+                        document.getElementById('vram-progress').style.width = '0%';
+                    }
                 } else {
                     document.getElementById('vram-usage').textContent = 'N/A';
                     document.getElementById('vram-progress').style.width = '0%';
                 }
             } else {
-                statusIndicator.className = 'status-indicator status-stopped';
-                statusText.textContent = data.worker_status || 'STOPPED';
+                // Handle different error states
+                if (data.worker_status === 'UNKNOWN' || data.message?.includes('Timeout')) {
+                    statusIndicator.className = 'status-indicator status-unknown';
+                    statusText.textContent = 'NOT_RESPONDING';
+                } else if (data.worker_status === 'ERROR') {
+                    statusIndicator.className = 'status-indicator status-stopped';
+                    statusText.textContent = 'ERROR';
+                } else {
+                    statusIndicator.className = 'status-indicator status-stopped';
+                    statusText.textContent = data.worker_status || 'STOPPED';
+                }
 
                 document.getElementById('hadm-l-status').textContent = 'UNKNOWN';
                 document.getElementById('hadm-g-status').textContent = 'UNKNOWN';
@@ -792,6 +933,8 @@
         function startDiagnosticsPolling() {
             // Poll diagnostics every 2 seconds
             setInterval(refreshDiagnostics, 2000);
+            // Poll logs every 3 seconds
+            setInterval(refreshLogs, 3000);
         }
 
         function showLoading(show) {
@@ -806,6 +949,80 @@
 
         function hideError() {
             document.getElementById('error-message').style.display = 'none';
+        }
+
+        // Log management functions
+        function switchLogTab(logType) {
+            // Update tab states
+            document.querySelectorAll('.log-tab').forEach(tab => {
+                tab.classList.remove('active');
+            });
+            document.querySelector(`[data-log="${logType}"]`).classList.add('active');
+
+            // Update content visibility
+            document.querySelectorAll('.log-content').forEach(content => {
+                content.classList.remove('active');
+            });
+            document.getElementById(`${logType}-log`).classList.add('active');
+        }
+
+        function clearCurrentLog() {
+            const activeTab = document.querySelector('.log-tab.active').dataset.log;
+            const logContent = document.getElementById(`${activeTab}-log`);
+            logContent.innerHTML = '';
+        }
+
+        async function refreshLogs() {
+            try {
+                const response = await fetch('/api/logs', {
+                    headers: {
+                        'Authorization': 'Basic ' + btoa('intelligents:intelligentsintelligents')
+                    }
+                });
+
+                const result = await response.json();
+                if (result.success) {
+                    updateLogDisplays(result.logs);
+                }
+            } catch (error) {
+                console.error('Error refreshing logs:', error);
+            }
+        }
+
+        function updateLogDisplays(logs) {
+            // Update each log display
+            ['uvicorn', 'hadm-l', 'hadm-g'].forEach(logType => {
+                const logContent = document.getElementById(`${logType}-log`);
+                const logEntries = logs[logType] || [];
+
+                // Keep only last 100 lines to prevent memory issues
+                const maxLines = 100;
+                if (logEntries.length > maxLines) {
+                    logEntries.splice(0, logEntries.length - maxLines);
+                }
+
+                // Format log entries
+                const formattedLog = logEntries.map(entry => {
+                    const timestamp = entry.timestamp || '??:??:??';
+                    const level = (entry.level || 'INFO').toUpperCase();
+                    const message = entry.message || '';
+
+                    // Escape HTML to prevent injection issues
+                    const safeMessage = message.replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+                    return `<div class="log-entry">` +
+                        `<span class="log-timestamp">[${timestamp}]</span> ` +
+                        `<span class="log-level-${level}">${level}</span>: ` +
+                        `<span class="log-message">${safeMessage}</span>` +
+                        `</div>`;
+                }).join('');
+
+                if (logContent.innerHTML !== formattedLog) {
+                    logContent.innerHTML = formattedLog;
+                    // Auto-scroll to bottom
+                    logContent.scrollTop = logContent.scrollHeight;
+                }
+            });
         }
     </script>
 </body>
